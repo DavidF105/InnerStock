@@ -171,3 +171,35 @@ def test_profile_lookups_are_cached(client, alice, market_events, monkeypatch):
     get_rows(client, alice)
     get_rows(client, alice)
     assert calls == ["AAPL"]
+
+
+def test_goog_cdr_gets_alphabets_next_date_from_the_earnings_calendar(client, alice, market_events):
+    # The real Nov 2026 situation: GOOG's info only had the Oct 28 report
+    # it had just made; the earnings calendar page already listed Feb 3.
+    market_events.profiles["GOOG.TO"] = stock("Alphabet Inc.", start_days=-400, short_name="ALPHABET CDR (CAD HEDGED)")
+    market_events.profiles["GOOG"] = stock("Alphabet Inc.", start_days=-18)
+    market_events.calendar["GOOG"] = [et_stamp(80), et_stamp(-18), et_stamp(-116)]
+    log_trade(client, alice, "GOOG.TO", "buy", 4, 40)
+
+    earnings = get_rows(client, alice)[0]["earnings"]
+    assert earnings["days_until"] == 80
+    assert earnings["is_estimate"] is True  # not confirmed by the company yet
+    assert earnings["timing"] is None
+
+
+def test_calendar_is_only_asked_when_info_has_no_upcoming_date(client, alice, market_events, monkeypatch):
+    calls = []
+    monkeypatch.setattr(holdings_news, "load_calendar_earnings", lambda t: calls.append(t) or [et_stamp(99)])
+    market_events.profiles["AAPL"] = stock("Apple Inc.", start_days=10)
+    log_trade(client, alice, "AAPL", "buy", 1, 100)
+    assert get_rows(client, alice)[0]["earnings"]["days_until"] == 10
+    assert calls == []
+
+
+def test_berkshire_cdr_maps_to_the_dashed_class_b_listing(client, alice, market_events):
+    # Yahoo has no bare "BRK" - Berkshire's B shares are "BRK-B".
+    market_events.profiles["BRK.TO"] = stock("Berkshire Hathaway Inc.", start_days=-300,
+                                             short_name="BERKSHIRE HATHAWAY CDR (CAD HED")
+    market_events.profiles["BRK-B"] = stock("Berkshire Hathaway Inc.", start_days=30)
+    log_trade(client, alice, "BRK.TO", "buy", 2, 30)
+    assert get_rows(client, alice)[0]["earnings"]["days_until"] == 30

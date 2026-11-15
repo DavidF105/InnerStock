@@ -92,15 +92,17 @@ def market_events(monkeypatch):
     market_events.profiles["AAPL"] = {"name": "Apple Inc.", "quote_type": "EQUITY",
                                       "earnings_start": <unix ts>, ...}
     market_events.news["AAPL"] = [<yfinance-shaped news item>, ...]
+    market_events.calendar["GOOG"] = [<unix ts of a report>, ...]  # earnings calendar page
 
-    Replaces holdings_news.load_profile / load_news (its only network
-    calls). A ticker missing from a table behaves like a failed lookup.
+    Replaces holdings_news.load_profile / load_news / load_calendar_earnings
+    (its only network calls). A ticker missing from a table behaves like a failed lookup.
     The module's in-memory cache is cleared so tests can't leak into each
     other.
     """
-    tables = SimpleNamespace(profiles={}, news={})
+    tables = SimpleNamespace(profiles={}, news={}, calendar={})
     monkeypatch.setattr(holdings_news, "load_profile", lambda ticker: tables.profiles.get(ticker))
     monkeypatch.setattr(holdings_news, "load_news", lambda ticker: tables.news.get(ticker))
+    monkeypatch.setattr(holdings_news, "load_calendar_earnings", lambda ticker: tables.calendar.get(ticker))
     holdings_news.clear_cache()
     yield tables
     holdings_news.clear_cache()

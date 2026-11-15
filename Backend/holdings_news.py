@@ -98,6 +98,25 @@ def load_news(ticker):
         return None
 
 
+def load_calendar_earnings(ticker):
+    """Report times from Yahoo's earnings calendar page (Unix timestamps), or None on failure.
+
+    NEW: fallback for when Ticker.info has no upcoming date. For a few
+    weeks after a report, Yahoo's info fields only carry the report that
+    just happened (in Nov 2026 GOOG/AMZN still showed their Oct 28/29
+    reports), while the calendar page already lists the next expected one.
+    yfinance parses that page with pandas, which needs lxml installed.
+    """
+    try:
+        dates = yf.Ticker(ticker).get_earnings_dates(limit=4)
+    except Exception as e:
+        print(f"[holdings-news] yfinance earnings calendar failed for {ticker}: {e}")
+        return None
+    if dates is None or dates.empty:
+        return []
+    return [moment.timestamp() for moment in dates.index]
+
+
 # --- Small TTL cache ---------------------------------------------------------------
 # In-memory, like grading's price-history cache: on Vercel each warm
 # instance keeps its own copy, which is fine for data that's this cheap to
@@ -107,6 +126,7 @@ def load_news(ticker):
 
 _profile_cache = {}
 _news_cache = {}
+_calendar_cache = {}
 _cache_lock = threading.Lock()
 
 
@@ -114,6 +134,7 @@ def clear_cache():
     with _cache_lock:
         _profile_cache.clear()
         _news_cache.clear()
+        _calendar_cache.clear()
 
 
 def _cached(cache, key, ttl, loader):
@@ -142,6 +163,10 @@ def get_news(ticker):
     return _cached(_news_cache, ticker, NEWS_TTL_SECONDS, load_news)
 
 
+def get_calendar_earnings(ticker):
+    return _cached(_calendar_cache, ticker, PROFILE_TTL_SECONDS, load_calendar_earnings)
+
+
 # --- CDRs ----------------------------------------------------------------------------
 
 def _normalize_name(name):
@@ -156,13 +181,19 @@ def resolve_source(ticker, profile):
     stripping ".TO" is only safe when we can PROVE it's the same company -
     T.TO is Telus while T is AT&T - so the fallback needs both "CDR" in the
     name and an identical company name on the US listing.
+
+    NEW: some US listings have a share class Yahoo writes with a dash -
+    BRK.TO tracks Berkshire's B shares, which Yahoo calls BRK-B, and bare
+    "BRK" doesn't exist - so the class variants are tried too, under the
+    same name check.
     """
     if not (profile and ticker.endswith(".TO") and "CDR" in (profile.get("short_name") or "").upper()):
         return ticker, profile
     base = ticker[:-3]
-    base_profile = get_profile(base)
-    if base_profile and _normalize_name(base_profile.get("name")) == _normalize_name(profile.get("name")):
-        return base, base_profile
+    for candidate in (base, f"{base}-B", f"{base}-A"):
+        candidate_profile = get_profile(candidate)
+        if candidate_profile and _normalize_name(candidate_profile.get("name")) == _normalize_name(profile.get("name")):
+            return candidate, candidate_profile
     return ticker, profile
 
 
@@ -199,6 +230,27 @@ def upcoming_earnings(profile, today):
         "days_until": (first.date() - today).days,
         "is_estimate": bool(is_estimate),
         "timing": timing,
+    }
+
+
+def calendar_earnings(stamps, today):
+    """NEW: the next report from the earnings calendar page (load_calendar_earnings).
+
+    Always marked as an estimate with no time of day: the calendar lists
+    Yahoo's projected date before the company has confirmed one.
+    """
+    days = sorted(
+        datetime.fromtimestamp(stamp, tz=timezone.utc).astimezone(MARKET_TZ).date()
+        for stamp in stamps or []
+    )
+    upcoming = [day for day in days if day >= today]
+    if not upcoming:
+        return None
+    return {
+        "date": upcoming[0].isoformat(),
+        "days_until": (upcoming[0] - today).days,
+        "is_estimate": True,
+        "timing": None,
     }
 
 
@@ -363,6 +415,10 @@ def build_row(ticker, today, now):
 
     source_ticker, source_profile = resolve_source(ticker, profile)
     row["earnings"] = upcoming_earnings(source_profile, today)
+    if row["earnings"] is None:
+        # Info only had the last report - ask the earnings calendar page
+        # for the next one (an extra call, so only when it's needed).
+        row["earnings"] = calendar_earnings(get_calendar_earnings(source_ticker), today)
     raw_news = get_news(source_ticker)
     if raw_news is None:
         row["news_available"] = False

@@ -28,6 +28,7 @@ PROTECTED_GET_ROUTES = [
     "/profile",
     "/chat/history",
     "/watchlist",
+    "/holdings/news",
     "/auth/me",
 ]
 
@@ -121,6 +122,12 @@ def test_owner_can_grade_their_own_trade(client, alice):
     assert client.get("/thesis-reviews", headers=alice).json()["reviews"] == []
     recent = client.get("/thesis-reviews/recent", headers=alice).json()
     assert "correct" in str(recent)
+
+
+def test_holdings_news_is_scoped(client, alice, bob):
+    log_trade(client, alice, "AAPL", "buy", 5, 100)
+    assert [h["ticker"] for h in client.get("/holdings/news", headers=alice).json()["holdings"]] == ["AAPL"]
+    assert client.get("/holdings/news", headers=bob).json()["holdings"] == []
 
 
 def test_thesis_reviews_are_scoped(client, alice, bob):

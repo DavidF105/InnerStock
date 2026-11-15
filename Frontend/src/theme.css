@@ -982,3 +982,107 @@ input, select, textarea, button {
 .sidebar-watchlist-add:hover {
   color: var(--color-accent);
 }
+
+/* NEW: holdings earnings & news (SidebarHoldingsNews.jsx). Reuses the
+   watchlist's title/ticker styles so the two sections read as one family. */
+.sidebar-holdings-news {
+  margin-top: 0; /* .sidebar's own gap already separates it from the watchlist */
+}
+
+.holdings-news-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  width: 100%;
+  padding: 4px 0;
+  background: transparent;
+  border: none;
+  color: inherit;
+  font: inherit;
+  font-size: var(--text-sm);
+  text-align: left;
+  cursor: pointer;
+}
+
+.holdings-news-row:hover .sidebar-watchlist-ticker,
+.holdings-news-row.open .sidebar-watchlist-ticker {
+  color: var(--color-accent);
+}
+
+.earnings-chip {
+  font-size: var(--text-xs);
+  color: var(--color-text-secondary);
+  background: var(--color-surface-alt);
+  border-radius: var(--radius-sm);
+  padding: 1px 6px;
+  white-space: nowrap;
+}
+
+/* Earnings within a week - the one thing in this list worth catching your eye */
+.earnings-chip.soon {
+  background: var(--color-accent);
+  color: var(--color-accent-ink);
+  font-weight: var(--font-weight-medium);
+}
+
+.earnings-chip.none {
+  background: transparent;
+  color: var(--color-text-muted);
+}
+
+/* Count of news stories waiting behind the row */
+.holdings-news-count {
+  font-size: 10px;
+  min-width: 16px;
+  text-align: center;
+  color: var(--color-text-muted);
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  padding: 0 4px;
+}
+
+.holdings-news-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 2px 0 var(--space-xs);
+  padding-left: var(--space-xs);
+  border-left: 2px solid var(--color-border);
+}
+
+.holdings-news-name {
+  font-size: var(--text-xs);
+  color: var(--color-text-secondary);
+}
+
+.holdings-news-earnings {
+  font-size: var(--text-xs);
+  color: var(--color-text-primary);
+}
+
+.holdings-news-link {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  text-decoration: none;
+}
+
+.holdings-news-title {
+  font-size: var(--text-xs);
+  line-height: 1.35;
+  color: var(--color-text-primary);
+  /* Two lines max - the sidebar is only 220px wide */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.holdings-news-link:hover .holdings-news-title {
+  color: var(--color-accent);
+}
+
+.holdings-news-meta {
+  font-size: 11px;
+  color: var(--color-text-muted);
+}

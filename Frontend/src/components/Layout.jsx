@@ -9,6 +9,7 @@ import {
   IconHelpCircle,
 } from "@tabler/icons-react"
 import SidebarWatchlist from "./SidebarWatchlist"
+import SidebarHoldingsNews from "./SidebarHoldingsNews"
 
 // One nav row. Pure presentation — active state and the click handler are
 // both owned by the parent, this component just renders what it's told.
@@ -49,6 +50,9 @@ function Layout({ activeView, inboxCount, onNavigate, onLogout, onChangeContext,
         </nav>
 
         <SidebarWatchlist onNavigate={onNavigate} />
+
+        {/* NEW: next earnings date + key company news for each holding */}
+        <SidebarHoldingsNews />
 
         
         {/* margin-top: auto (set on .nav-footer in theme.css) pins this to

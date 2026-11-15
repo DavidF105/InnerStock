@@ -28,6 +28,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 import grading
+import holdings_news
 import main
 from database import Base
 
@@ -85,7 +86,28 @@ def history(monkeypatch):
 
 
 @pytest.fixture
-def client(db_session_factory, prices, history, monkeypatch):
+def market_events(monkeypatch):
+    """Fake yfinance data for /holdings/news: profiles and news per ticker.
+
+    market_events.profiles["AAPL"] = {"name": "Apple Inc.", "quote_type": "EQUITY",
+                                      "earnings_start": <unix ts>, ...}
+    market_events.news["AAPL"] = [<yfinance-shaped news item>, ...]
+
+    Replaces holdings_news.load_profile / load_news (its only network
+    calls). A ticker missing from a table behaves like a failed lookup.
+    The module's in-memory cache is cleared so tests can't leak into each
+    other.
+    """
+    tables = SimpleNamespace(profiles={}, news={})
+    monkeypatch.setattr(holdings_news, "load_profile", lambda ticker: tables.profiles.get(ticker))
+    monkeypatch.setattr(holdings_news, "load_news", lambda ticker: tables.news.get(ticker))
+    holdings_news.clear_cache()
+    yield tables
+    holdings_news.clear_cache()
+
+
+@pytest.fixture
+def client(db_session_factory, prices, history, market_events, monkeypatch):
     def override_get_db():
         db = db_session_factory()
         try:

@@ -89,6 +89,11 @@ app.include_router(thesis.router)
 import grading
 app.include_router(grading.router)
 
+# NEW: upcoming earnings dates + the most important company-specific news
+# for each stock the user holds (sidebar, under the watchlist): /holdings/news
+import holdings_news
+app.include_router(holdings_news.router)
+
 # AI RATE LIMITING: every endpoint that can trigger a real Claude call
 # (sentiment, bull/bear, advisor chat) costs money per hit, so each user
 # gets a capped number of Claude calls per rolling window. Without this, a

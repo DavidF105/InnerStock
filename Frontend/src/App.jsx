@@ -65,8 +65,15 @@ function App() {
       })
   }, [token])
 
+  // NEW: tells sidebar sections that depend on WHAT you hold (not just
+  // prices) - currently the holdings earnings/news list - to reload.
+  function notifyHoldingsChanged() {
+    window.dispatchEvent(new Event("holdings-updated"))
+  }
+
   function handleTradeLogged() {
     setRefreshKey((prev) => prev + 1)
+    notifyHoldingsChanged()
   }
 
   function handleLogin(newToken) {
@@ -112,7 +119,7 @@ function App() {
       onChangeContext={() => setActiveView('editprofile')}
     >
       {activeView === 'dashboard' && (
-  <Dashboard refreshKey={refreshKey} onNavigate={setActiveView} inboxCount={inboxCount} onBrokerageSynced={refreshInboxCount} />
+  <Dashboard refreshKey={refreshKey} onNavigate={setActiveView} inboxCount={inboxCount} onBrokerageSynced={() => { refreshInboxCount(); notifyHoldingsChanged() }} />
 )}
       {activeView === 'editprofile' && (
         // Same component as the required first-time survey, just in

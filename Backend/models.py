@@ -190,3 +190,52 @@ class SnapTradeUser(Base):
     # (secret_box.py) - never stored in plain text.
     user_secret_encrypted = Column(Text, nullable=False)
     created_at = Column(DateTime, server_default=func.now())
+
+
+class EarningsRecap(Base):
+    __tablename__ = "earnings_recaps"
+
+    # NEW: Claude's write-up of one company's earnings report - what
+    # happened and what it means for the company (earnings_recaps.py).
+    # Shared by every user who held the stock, so each report is written
+    # (and paid for) once, not once per user.
+    id = Column(Integer, primary_key=True)
+    # The ticker the facts came from - the US listing for a CDR (GOOG for
+    # GOOG.TO), so Canadian and US holders share one recap.
+    ticker = Column(String, nullable=False)
+    company_name = Column(String, nullable=True)
+    report_date = Column(Date, nullable=False)              # US/Eastern
+    # Numbers from Yahoo's earnings calendar; None when Yahoo didn't have them.
+    eps_estimate = Column(Float, nullable=True)
+    eps_actual = Column(Float, nullable=True)
+    surprise_pct = Column(Float, nullable=True)
+    # Stock move from the last close before the report to the first close
+    # after it, and on to the latest close when the recap was written.
+    reaction_pct = Column(Float, nullable=True)
+    move_since_pct = Column(Float, nullable=True)
+    headline = Column(String, nullable=False)
+    what_happened = Column(Text, nullable=False)
+    what_it_means = Column(Text, nullable=False)
+    sentiment = Column(String, nullable=False)              # positive / neutral / negative
+    sources = Column(Text, nullable=True)                   # JSON list of {title, url, publisher}
+    created_at = Column(DateTime, server_default=func.now())
+
+    __table_args__ = (UniqueConstraint("ticker", "report_date", name="uq_earnings_recaps_ticker_date"),)
+
+
+class EarningsNotification(Base):
+    __tablename__ = "earnings_notifications"
+
+    # NEW: "a stock you hold reported - here's the recap", one row per user
+    # per recap. read_at stays NULL until the user opens the notifications
+    # page (that's what the sidebar bell's unread count is).
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    recap_id = Column(Integer, ForeignKey("earnings_recaps.id"), nullable=False)
+    # What the user actually holds (GOOG.TO), which can differ from the
+    # recap's ticker (GOOG).
+    display_ticker = Column(String, nullable=False)
+    created_at = Column(DateTime, server_default=func.now())
+    read_at = Column(DateTime, nullable=True)
+
+    __table_args__ = (UniqueConstraint("user_id", "recap_id", name="uq_earnings_notifications_user_recap"),)

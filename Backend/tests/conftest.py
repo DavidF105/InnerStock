@@ -27,6 +27,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+import earnings_recaps
 import grading
 import holdings_news
 import main
@@ -92,7 +93,8 @@ def market_events(monkeypatch):
     market_events.profiles["AAPL"] = {"name": "Apple Inc.", "quote_type": "EQUITY",
                                       "earnings_start": <unix ts>, ...}
     market_events.news["AAPL"] = [<yfinance-shaped news item>, ...]
-    market_events.calendar["GOOG"] = [<unix ts of a report>, ...]  # earnings calendar page
+    market_events.calendar["GOOG"] = [{"ts": <unix ts>, "eps_estimate": 2.98,
+                                       "eps_actual": 2.67 or None, "surprise_pct": ...}, ...]
 
     Replaces holdings_news.load_profile / load_news / load_calendar_earnings
     (its only network calls). A ticker missing from a table behaves like a failed lookup.
@@ -109,7 +111,30 @@ def market_events(monkeypatch):
 
 
 @pytest.fixture
-def client(db_session_factory, prices, history, market_events, monkeypatch):
+def recap_writer(monkeypatch):
+    """Fake Claude for earnings recaps: records each call's facts and returns a canned recap.
+
+    Set recap_writer.result = None to simulate Claude failing. Also lifts
+    the AI rate limit so tests aren't affected by earlier tests' calls.
+    """
+    state = SimpleNamespace(calls=[], result={
+        "headline": "Results beat estimates",
+        "what_happened": "EPS came in above the estimate and the stock rose.",
+        "what_it_means": "Demand looks healthy.",
+        "sentiment": "positive",
+    })
+
+    def fake_write_recap(facts):
+        state.calls.append(facts)
+        return dict(state.result) if state.result else None
+
+    monkeypatch.setattr(earnings_recaps, "write_recap", fake_write_recap)
+    monkeypatch.setattr(earnings_recaps, "_enforce_rate_limit", lambda user_id: None)
+    return state
+
+
+@pytest.fixture
+def client(db_session_factory, prices, history, market_events, recap_writer, monkeypatch):
     def override_get_db():
         db = db_session_factory()
         try:

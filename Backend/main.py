@@ -94,6 +94,13 @@ app.include_router(grading.router)
 import holdings_news
 app.include_router(holdings_news.router)
 
+# NEW: earnings recaps + in-app notifications (sidebar bell): /notifications.
+# When a stock you hold reports, Claude writes a recap of what happened and
+# what it means for the company - once per company per report, shared by
+# every holder.
+import earnings_recaps
+app.include_router(earnings_recaps.router)
+
 # AI RATE LIMITING: every endpoint that can trigger a real Claude call
 # (sentiment, bull/bear, advisor chat) costs money per hit, so each user
 # gets a capped number of Claude calls per rolling window. Without this, a

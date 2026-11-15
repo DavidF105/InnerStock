@@ -26,7 +26,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from deps import get_current_user, get_db
-from models import Trade, User
+from models import EarningsNotification, EarningsRecap, Trade, User
 
 router = APIRouter(tags=["holdings"])
 
@@ -45,6 +45,9 @@ FAILURE_RETRY_SECONDS = 2 * 60       # after a failed yfinance call, wait before
 NEWS_FETCH_COUNT = 20      # pull more than we show, since most get filtered out
 NEWS_PER_TICKER = 3
 NEWS_MAX_AGE_DAYS = 7
+
+# How long after a report its recap stays attached to the sidebar row.
+RECAP_SHOWN_DAYS = 30
 
 # Parallel yfinance lookups - one holding at a time would make a 10-stock
 # portfolio take 10+ seconds on a cold cache.
@@ -90,21 +93,47 @@ def load_profile(ticker):
 
 
 def load_news(ticker):
-    """Raw yfinance news items for a ticker, or None on failure."""
+    """Raw yfinance news items for a ticker, or None if every source failed.
+
+    NEW: Yahoo's per-ticker news stream (Ticker.get_news) went down for a
+    whole day in Nov 2026 ("YAHOO! FINANCE IS CURRENTLY DOWN!") while its
+    search endpoint kept working, so search news is the fallback. Search
+    results are looser (anything mentioning the symbol), but rank_news only
+    keeps stories that name the company anyway.
+    """
     try:
-        return yf.Ticker(ticker).get_news(count=NEWS_FETCH_COUNT) or []
+        items = yf.Ticker(ticker).get_news(count=NEWS_FETCH_COUNT)
+        if items:
+            return items
     except Exception as e:
-        print(f"[holdings-news] yfinance news failed for {ticker}: {e}")
+        print(f"[holdings-news] yfinance news failed for {ticker}, trying search: {e}")
+    try:
+        return yf.Search(ticker, news_count=NEWS_FETCH_COUNT, max_results=1).news or []
+    except Exception as e:
+        print(f"[holdings-news] yfinance search news failed for {ticker}: {e}")
         return None
 
 
+def _number(value):
+    """A float, or None for missing/NaN values (pandas uses NaN for "not reported yet")."""
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return None
+    return None if value != value else value
+
+
 def load_calendar_earnings(ticker):
-    """Report times from Yahoo's earnings calendar page (Unix timestamps), or None on failure.
+    """Reports from Yahoo's earnings calendar page, or None on failure.
+
+    Each entry: {"ts": unix time, "eps_estimate", "eps_actual", "surprise_pct"}
+    (eps_actual / surprise_pct are None until the company has reported).
 
     NEW: fallback for when Ticker.info has no upcoming date. For a few
     weeks after a report, Yahoo's info fields only carry the report that
     just happened (in Nov 2026 GOOG/AMZN still showed their Oct 28/29
     reports), while the calendar page already lists the next expected one.
+    The reported numbers also feed the earnings recaps (earnings_recaps.py).
     yfinance parses that page with pandas, which needs lxml installed.
     """
     try:
@@ -114,7 +143,15 @@ def load_calendar_earnings(ticker):
         return None
     if dates is None or dates.empty:
         return []
-    return [moment.timestamp() for moment in dates.index]
+    return [
+        {
+            "ts": moment.timestamp(),
+            "eps_estimate": _number(row.get("EPS Estimate")),
+            "eps_actual": _number(row.get("Reported EPS")),
+            "surprise_pct": _number(row.get("Surprise(%)")),
+        }
+        for moment, row in dates.iterrows()
+    ]
 
 
 # --- Small TTL cache ---------------------------------------------------------------
@@ -138,6 +175,7 @@ def clear_cache():
 
 
 def _cached(cache, key, ttl, loader):
+    """`ttl` is seconds, or a function of the loaded value returning seconds."""
     now = monotonic()
     with _cache_lock:
         entry = cache.get(key)
@@ -151,7 +189,7 @@ def _cached(cache, key, ttl, loader):
             stale = entry[1] if entry else None
             cache[key] = (now + FAILURE_RETRY_SECONDS, stale)
             return stale
-        cache[key] = (now + ttl, value)
+        cache[key] = (now + (ttl(value) if callable(ttl) else ttl), value)
         return value
 
 
@@ -163,8 +201,17 @@ def get_news(ticker):
     return _cached(_news_cache, ticker, NEWS_TTL_SECONDS, load_news)
 
 
+def _calendar_ttl(reports):
+    """Re-check hourly while a report from the last 2 days still has no
+    numbers (results come out over the following hours); 12h otherwise."""
+    cutoff = datetime.now(timezone.utc).timestamp() - 2 * 24 * 3600
+    now = datetime.now(timezone.utc).timestamp()
+    waiting = any(cutoff <= r["ts"] <= now and r.get("eps_actual") is None for r in reports)
+    return 60 * 60 if waiting else PROFILE_TTL_SECONDS
+
+
 def get_calendar_earnings(ticker):
-    return _cached(_calendar_cache, ticker, PROFILE_TTL_SECONDS, load_calendar_earnings)
+    return _cached(_calendar_cache, ticker, _calendar_ttl, load_calendar_earnings)
 
 
 # --- CDRs ----------------------------------------------------------------------------
@@ -233,15 +280,15 @@ def upcoming_earnings(profile, today):
     }
 
 
-def calendar_earnings(stamps, today):
+def calendar_earnings(reports, today):
     """NEW: the next report from the earnings calendar page (load_calendar_earnings).
 
     Always marked as an estimate with no time of day: the calendar lists
     Yahoo's projected date before the company has confirmed one.
     """
     days = sorted(
-        datetime.fromtimestamp(stamp, tz=timezone.utc).astimezone(MARKET_TZ).date()
-        for stamp in stamps or []
+        datetime.fromtimestamp(report["ts"], tz=timezone.utc).astimezone(MARKET_TZ).date()
+        for report in reports or []
     )
     upcoming = [day for day in days if day >= today]
     if not upcoming:
@@ -349,8 +396,8 @@ def parse_article(item):
     }
 
 
-def rank_news(raw_items, ticker, profile, now):
-    """The NEWS_PER_TICKER most important recent articles that are actually about this company."""
+def rank_news(raw_items, ticker, profile, now, limit=NEWS_PER_TICKER):
+    """The `limit` most important recent articles that are actually about this company."""
     patterns = match_patterns(ticker, profile)
     cutoff = now - timedelta(days=NEWS_MAX_AGE_DAYS)
     scored = []
@@ -391,7 +438,7 @@ def rank_news(raw_items, ticker, profile, now):
             "publisher": article["publisher"],
             "published_at": article["published_at"].isoformat() if article["published_at"] else None,
         }
-        for _, _, article in scored[:NEWS_PER_TICKER]
+        for _, _, article in scored[:limit]
     ]
 
 
@@ -438,6 +485,30 @@ def holdings_news(db: Session = Depends(get_db), current_user: User = Depends(ge
     now = datetime.now(timezone.utc)
     with ThreadPoolExecutor(max_workers=min(MAX_WORKERS, len(tickers))) as pool:
         rows = list(pool.map(lambda t: build_row(t, today, now), tickers))
+
+    # NEW: the latest earnings recap per holding (see earnings_recaps.py),
+    # so the expanded sidebar row can say "Reported Nov 17: ..." and link to
+    # it. Only recaps this user was notified about, i.e. ones for a report
+    # that happened while they held the stock.
+    recent = (
+        db.query(EarningsNotification, EarningsRecap)
+        .join(EarningsRecap, EarningsNotification.recap_id == EarningsRecap.id)
+        .filter(EarningsNotification.user_id == current_user.id,
+                EarningsRecap.report_date >= today - timedelta(days=RECAP_SHOWN_DAYS))
+        .order_by(EarningsRecap.report_date.desc())
+        .all()
+    )
+    latest_recap = {}
+    for notification, recap in recent:
+        latest_recap.setdefault(notification.display_ticker, {
+            "notification_id": notification.id,
+            "report_date": recap.report_date.isoformat(),
+            "headline": recap.headline,
+            "sentiment": recap.sentiment,
+            "unread": notification.read_at is None,
+        })
+    for row in rows:
+        row["recap"] = latest_recap.get(row["ticker"])
 
     # Soonest earnings first - that's what you need to act on - then
     # everything without an announced date, alphabetically.

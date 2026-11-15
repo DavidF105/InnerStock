@@ -9,11 +9,15 @@ import ChatScreen from './components/ChatScreen'
 import { apiFetch } from './api'
 import SearchPage from './components/SearchPage'
 import ThesisInbox from './components/ThesisInbox'
+import NotificationsPage from './components/NotificationsPage'
 
 function App() {
   const [token, setToken] = useState(localStorage.getItem("token"))
   const [refreshKey, setRefreshKey] = useState(0)
   const [activeView, setActiveView] = useState('dashboard')
+  // NEW: which earnings recap to scroll to when the Notifications page is
+  // opened from a sidebar "Read recap" link (null = just open the page).
+  const [focusRecapId, setFocusRecapId] = useState(null)
 
   // Tracks whether the logged-in user has completed the survey yet.
   // null = still checking, true = has a profile, false = needs the survey.
@@ -114,7 +118,8 @@ function App() {
     <Layout
       activeView={activeView}
       inboxCount={inboxCount}
-      onNavigate={setActiveView}
+      onNavigate={(view) => { setFocusRecapId(null); setActiveView(view) }}
+      onOpenRecap={(id) => { setFocusRecapId(id); setActiveView('notifications') }}
       onLogout={handleLogout}
       onChangeContext={() => setActiveView('editprofile')}
     >
@@ -152,6 +157,11 @@ function App() {
       )}
       {activeView === 'advisor' && (
         <ChatScreen />
+      )}
+      {activeView === 'notifications' && (
+        // key: opening a different recap from the sidebar while already on
+        // this page remounts it, so it re-fetches and scrolls to the new one
+        <NotificationsPage key={focusRecapId ?? 'all'} focusId={focusRecapId} />
       )}
     </Layout>
   )

@@ -10,6 +10,7 @@ import {
 } from "@tabler/icons-react"
 import SidebarWatchlist from "./SidebarWatchlist"
 import SidebarHoldingsNews from "./SidebarHoldingsNews"
+import NotificationsBell from "./NotificationsBell"
 
 // One nav row. Pure presentation — active state and the click handler are
 // both owned by the parent, this component just renders what it's told.
@@ -32,13 +33,15 @@ function NavItem({ label, active, onClick, icon, badge }) {
 // `.main` and is responsible for its OWN topbar/content — Layout only
 // owns the parts that are identical on every screen: the brand mark,
 // the four nav items, and the logout control.
-function Layout({ activeView, inboxCount, onNavigate, onLogout, onChangeContext, children }) {
+function Layout({ activeView, inboxCount, onNavigate, onOpenRecap, onLogout, onChangeContext, children }) {
   return (
     <div className="app-shell">
       <div className="sidebar">
         <div className="brand">
           <div className="brand-mark" />
           <span className="brand-name">InnerStock</span>
+          {/* NEW: unread earnings recaps -> Notifications page */}
+          <NotificationsBell active={activeView === "notifications"} onClick={() => onNavigate("notifications")} />
         </div>
         <nav className="nav">
           <NavItem label="Dashboard" active={activeView === "dashboard"} onClick={() => onNavigate("dashboard")} icon={<IconLayoutDashboard size={16} />} />
@@ -52,7 +55,7 @@ function Layout({ activeView, inboxCount, onNavigate, onLogout, onChangeContext,
         <SidebarWatchlist onNavigate={onNavigate} />
 
         {/* NEW: next earnings date + key company news for each holding */}
-        <SidebarHoldingsNews />
+        <SidebarHoldingsNews onOpenRecap={onOpenRecap} />
 
         
         {/* margin-top: auto (set on .nav-footer in theme.css) pins this to

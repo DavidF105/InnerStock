@@ -29,6 +29,7 @@ PROTECTED_GET_ROUTES = [
     "/chat/history",
     "/watchlist",
     "/holdings/news",
+    "/notifications",
     "/auth/me",
 ]
 
@@ -128,6 +129,15 @@ def test_holdings_news_is_scoped(client, alice, bob):
     log_trade(client, alice, "AAPL", "buy", 5, 100)
     assert [h["ticker"] for h in client.get("/holdings/news", headers=alice).json()["holdings"]] == ["AAPL"]
     assert client.get("/holdings/news", headers=bob).json()["holdings"] == []
+
+
+def test_notifications_are_scoped(client, alice, bob, market_events):
+    from test_earnings_recaps import reported
+    reported(market_events, "AAPL", "Apple Inc.")
+    log_trade(client, alice, "AAPL", "buy", 5, 100)
+    assert len(client.get("/notifications", headers=alice).json()["notifications"]) == 1
+    bob_view = client.get("/notifications", headers=bob).json()
+    assert bob_view == {"unread_count": 0, "notifications": []}
 
 
 def test_thesis_reviews_are_scoped(client, alice, bob):

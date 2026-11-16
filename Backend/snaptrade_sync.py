@@ -92,8 +92,8 @@ def is_owner(user: User) -> bool:
 
 
 def is_available_for(user: User) -> bool:
-    if not is_configured():
-        return False
+    if not is_configured() or getattr(user, "is_demo", False):
+        return False  # NEW: demo accounts never see brokerage linking
     return True if is_commercial() else is_owner(user)
 
 

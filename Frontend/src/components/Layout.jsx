@@ -32,7 +32,8 @@ function NavItem({ label, active, onClick, icon, badge }) {
 // `.main` and is responsible for its OWN topbar/content — Layout only
 // owns the parts that are identical on every screen: the brand mark,
 // the four nav items, and the logout control.
-function Layout({ activeView, inboxCount, onNavigate, onOpenRecap, onLogout, onChangeContext, children }) {
+function Layout({ activeView, inboxCount, onNavigate, onOpenRecap, onLogout, onChangeContext,
+                  isDemo, onCreateAccount, notice, onDismissNotice, children }) {
   return (
     <div className="app-shell">
       <div className="sidebar">
@@ -95,7 +96,24 @@ function Layout({ activeView, inboxCount, onNavigate, onOpenRecap, onLogout, onC
         </div>
       </div>
 
-      <div className="main">{children}</div>
+      <div className="main">
+        {/* NEW: "Try the demo" accounts are throwaway - say so, and offer
+            the way out to a real account */}
+        {isDemo && (
+          <div className="app-banner demo">
+            <span>👀 You're exploring a demo with sample data. It disappears in 24 hours.</span>
+            <button className="btn btn-accent" onClick={onCreateAccount}>Create your free account</button>
+          </div>
+        )}
+        {/* NEW: one-off messages, e.g. after confirming an email */}
+        {notice && (
+          <div className={`app-banner ${notice.tone}`}>
+            <span>{notice.text}</span>
+            <button className="app-banner-close" onClick={onDismissNotice} aria-label="Dismiss">×</button>
+          </div>
+        )}
+        {children}
+      </div>
     </div>
   )
 }

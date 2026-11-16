@@ -15,7 +15,7 @@ os.environ["ANTHROPIC_API_KEY"] = "test-key-not-real"
 # be loaded - load_dotenv() skips variables that already exist. Brokerage
 # tests opt in with fake values via the fake_snaptrade fixture.
 for _name in ("SNAPTRADE_CLIENT_ID", "SNAPTRADE_CONSUMER_KEY", "SNAPTRADE_OWNER_EMAIL",
-              "SNAPTRADE_KEY_TYPE", "FIELD_ENCRYPTION_KEY"):
+              "SNAPTRADE_KEY_TYPE", "FIELD_ENCRYPTION_KEY", "GMAIL_ADDRESS", "GMAIL_APP_PASSWORD"):
     os.environ[_name] = ""
 
 from datetime import date, timedelta
@@ -27,7 +27,10 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+import accounts
+import demo
 import earnings_recaps
+import emailer
 import grading
 import holdings_news
 import main
@@ -134,7 +137,21 @@ def recap_writer(monkeypatch):
 
 
 @pytest.fixture
-def client(db_session_factory, prices, history, market_events, recap_writer, monkeypatch):
+def outbox(monkeypatch):
+    """Fake email: nothing is really sent; each email lands in this list as
+    {"to", "subject", "html", "text"}. Email counts as configured - a test
+    can monkeypatch.delenv("GMAIL_ADDRESS") to simulate it not being set up."""
+    sent = []
+    monkeypatch.setenv("GMAIL_ADDRESS", "innerstock.test@gmail.com")
+    monkeypatch.setenv("GMAIL_APP_PASSWORD", "fake fake fake fake")
+    monkeypatch.setenv("APP_URL", "https://innerstock.test")
+    monkeypatch.setattr(emailer, "send_email",
+                        lambda to, subject, html, text: sent.append({"to": to, "subject": subject, "html": html, "text": text}))
+    return sent
+
+
+@pytest.fixture
+def client(db_session_factory, prices, history, market_events, recap_writer, outbox, monkeypatch):
     def override_get_db():
         db = db_session_factory()
         try:
@@ -147,6 +164,11 @@ def client(db_session_factory, prices, history, market_events, recap_writer, mon
     monkeypatch.setattr(
         main, "check_fomo_for_trade", lambda trade: {"fomo_flag": False, "reason": "stubbed in tests"}
     )
+
+    # In-memory limits are global; start every test with a clean slate.
+    accounts._login_failures.clear()
+    demo._demo_starts.clear()
+    main._ai_call_log.clear()
 
     main.app.dependency_overrides[main.get_db] = override_get_db
     with TestClient(main.app) as test_client:

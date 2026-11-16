@@ -643,7 +643,7 @@ def chat(payload: ChatMessageIn, db: Session = Depends(get_db), current_user: Us
     # Checked before saving anything, so a rate-limited message isn't
     # stored in history without a reply to go with it. One message counts
     # once, however many lookups it takes.
-    main.enforce_ai_rate_limit(current_user.id, "chat")
+    main.enforce_ai_rate_limit(current_user.id, "demo_chat" if current_user.is_demo else "chat")
     text = payload.message.strip()
     if not text:
         raise HTTPException(status_code=400, detail="Message is empty")

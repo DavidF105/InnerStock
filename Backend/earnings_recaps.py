@@ -404,6 +404,7 @@ def serialize(notification, recap):
         "sources": json.loads(recap.sources) if recap.sources else [],
         "created_at": notification.created_at.isoformat() if notification.created_at else None,
         "unread": notification.read_at is None,
+        "emailed_at": notification.emailed_at.isoformat() if notification.emailed_at else None,
     }
 
 
@@ -445,3 +446,55 @@ def mark_read(notification_id: int, db: Session = Depends(get_db), current_user:
         notification.read_at = datetime.utcnow()
         db.commit()
     return {"success": True}
+
+
+# --- "Email me this" -----------------------------------------------------------------------
+# NEW: sends one recap to the user's own (confirmed) email address. Only
+# to their account address and only once it's confirmed, so this can't be
+# used to send mail to someone else. Limits: the same recap at most once
+# every RESEND_AFTER, and EMAILS_PER_DAY recap emails per user per day.
+
+RESEND_AFTER = timedelta(minutes=10)
+EMAILS_PER_DAY = 20
+
+
+@router.post("/notifications/{notification_id}/email")
+def email_recap(notification_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    import email_templates
+    import emailer
+
+    row = (
+        db.query(EarningsNotification, EarningsRecap)
+        .join(EarningsRecap, EarningsNotification.recap_id == EarningsRecap.id)
+        .filter(EarningsNotification.id == notification_id, EarningsNotification.user_id == current_user.id)
+        .first()
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Notification not found")
+    notification, recap = row
+
+    if current_user.is_demo:
+        raise HTTPException(status_code=403, detail={"code": "demo", "message": "Emailing recaps isn't available in the demo - create a free account to use it."})
+    if not current_user.email_verified:
+        raise HTTPException(status_code=403, detail={"code": "email_not_verified",
+                                                     "message": f"Confirm your email ({current_user.email}) first, then you can send recaps to it."})
+    now = datetime.utcnow()
+    if notification.emailed_at and now - notification.emailed_at < RESEND_AFTER:
+        raise HTTPException(status_code=429, detail="Already sent - check your inbox (and spam folder).")
+    sent_today = db.query(EarningsNotification).filter(
+        EarningsNotification.user_id == current_user.id, EarningsNotification.emailed_at >= now - timedelta(days=1)
+    ).count()
+    if sent_today >= EMAILS_PER_DAY:
+        raise HTTPException(status_code=429, detail="That's the most recap emails for today - try again tomorrow.")
+
+    subject, html, text = email_templates.recap_email(notification.display_ticker, recap, f"{emailer.app_url()}/")
+    try:
+        emailer.send_email(current_user.email, subject, html, text)
+    except emailer.EmailNotConfigured:
+        raise HTTPException(status_code=503, detail="Email isn't set up on this server yet.")
+    except emailer.EmailSendFailed:
+        raise HTTPException(status_code=502, detail="Couldn't send the email right now. Try again in a few minutes.")
+
+    notification.emailed_at = now
+    db.commit()
+    return {"sent": True, "to": current_user.email}

@@ -33,7 +33,56 @@ function Stat({ label, value, detail, toneValue }) {
   )
 }
 
-function RecapCard({ recap, focused }) {
+// NEW: "Email me this" - sends the recap to the user's own confirmed email
+// (POST /notifications/{id}/email). Unconfirmed emails get a "send me the
+// confirmation link" button instead; demo accounts can't email.
+function EmailButton({ recap, me }) {
+  const [state, setState] = useState(recap.emailed_at ? "sent-before" : "idle") // idle | sending | sent | sent-before
+  const [message, setMessage] = useState(null)
+  const [needsVerify, setNeedsVerify] = useState(false)
+
+  async function send() {
+    setState("sending")
+    setMessage(null)
+    try {
+      const response = await apiFetch(`/notifications/${recap.id}/email`, { method: "POST" })
+      const data = await response.json().catch(() => null)
+      if (!response.ok) {
+        const detail = data?.detail
+        if (detail?.code === "email_not_verified") setNeedsVerify(true)
+        throw new Error(typeof detail === "string" ? detail : detail?.message || "Couldn't send it - try again.")
+      }
+      setState("sent")
+      setMessage(`Sent to ${data.to}.`)
+    } catch (err) {
+      setState("idle")
+      setMessage(err.message)
+    }
+  }
+
+  async function resendConfirmation() {
+    setMessage(null)
+    const response = await apiFetch("/auth/send-verification", { method: "POST" }).catch(() => null)
+    const data = await response?.json().catch(() => null)
+    setMessage(response?.ok ? `Confirmation link sent to ${data?.to || "your email"} - click it, then come back and press Email me this.`
+      : data?.detail || "Couldn't send the link - try again later.")
+  }
+
+  if (me?.is_demo) {
+    return <div className="recap-email"><span className="recap-email-note">Emailing recaps is available once you create a free account.</span></div>
+  }
+  return (
+    <div className="recap-email">
+      <button className="btn" onClick={send} disabled={state === "sending"}>
+        {state === "sending" ? "Sending…" : state === "sent" ? "Sent ✓" : state === "sent-before" ? "Email me this again" : "Email me this"}
+      </button>
+      {needsVerify && <button className="btn" onClick={resendConfirmation}>Send confirmation link</button>}
+      {message && <span className="recap-email-note">{message}</span>}
+    </div>
+  )
+}
+
+function RecapCard({ recap, focused, me }) {
   const eps = recap.eps_actual != null ? `$${recap.eps_actual.toFixed(2)}` : "—"
   const epsDetail = recap.eps_estimate != null
     ? `vs $${recap.eps_estimate.toFixed(2)} expected (${formatPct(recap.surprise_pct)})`
@@ -83,6 +132,8 @@ function RecapCard({ recap, focused }) {
           </>
         )}
 
+        <EmailButton recap={recap} me={me} />
+
         <div className="recap-footnote">
           Written by Claude from Yahoo Finance numbers and headlines. A summary, not investment advice.
         </div>
@@ -91,7 +142,7 @@ function RecapCard({ recap, focused }) {
   )
 }
 
-function NotificationsPage({ focusId }) {
+function NotificationsPage({ focusId, me }) {
   const [recaps, setRecaps] = useState(null) // null = still loading
   const [error, setError] = useState(null)
 
@@ -140,7 +191,7 @@ function NotificationsPage({ focusId }) {
             means for the company shows up here.
           </p>
         )}
-        {recaps && recaps.map((recap) => <RecapCard key={recap.id} recap={recap} focused={recap.id === focusId} />)}
+        {recaps && recaps.map((recap) => <RecapCard key={recap.id} recap={recap} focused={recap.id === focusId} me={me} />)}
       </div>
     </>
   )

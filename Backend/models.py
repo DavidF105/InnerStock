@@ -1,3 +1,5 @@
+import json
+
 from sqlalchemy import Boolean, Column, Integer, String, Numeric, Date, DateTime, Float, ForeignKey, Text, Time, UniqueConstraint
 from sqlalchemy.sql import false, func
 from database import Base
@@ -11,6 +13,14 @@ class User(Base):
     email = Column(String, unique=True, nullable=False, index=True)
     hashed_password = Column(String, nullable=False)
     created_at = Column(DateTime, server_default=func.now())
+    # NEW: set once the user clicks the link in the confirmation email (or
+    # a password-reset link, which proves the same thing). Recaps are only
+    # emailed to confirmed addresses, so nobody can sign up with someone
+    # else's email and fill their inbox.
+    email_verified = Column(Boolean, nullable=False, server_default=false())
+    # NEW: a throwaway "Try the demo" account (demo.py) - sample data,
+    # deleted after 24 hours, no email or brokerage features.
+    is_demo = Column(Boolean, nullable=False, server_default=false())
 
 class UserProfile(Base):
     __tablename__ = "user_profiles"
@@ -226,6 +236,11 @@ class EarningsRecap(Base):
 
     __table_args__ = (UniqueConstraint("ticker", "report_date", name="uq_earnings_recaps_ticker_date"),)
 
+    @property
+    def sources_list(self):
+        """`sources` decoded: [{title, url, publisher}, ...]."""
+        return json.loads(self.sources) if self.sources else []
+
 
 class EarningsNotification(Base):
     __tablename__ = "earnings_notifications"
@@ -241,5 +256,22 @@ class EarningsNotification(Base):
     display_ticker = Column(String, nullable=False)
     created_at = Column(DateTime, server_default=func.now())
     read_at = Column(DateTime, nullable=True)
+    # NEW: last time the user sent this recap to their email ("Email me this").
+    emailed_at = Column(DateTime, nullable=True)
 
     __table_args__ = (UniqueConstraint("user_id", "recap_id", name="uq_earnings_notifications_user_recap"),)
+
+
+class EmailToken(Base):
+    __tablename__ = "email_tokens"
+
+    # NEW: one-time links sent by email (accounts.py) - "confirm your email"
+    # and "reset your password". Only a SHA-256 hash of the token is stored,
+    # so someone reading the database can't use the links.
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    purpose = Column(String, nullable=False)                 # "verify" or "reset"
+    token_hash = Column(String, nullable=False, unique=True)
+    expires_at = Column(DateTime, nullable=False)
+    used_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, server_default=func.now())

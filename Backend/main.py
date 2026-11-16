@@ -107,6 +107,16 @@ app.include_router(earnings_recaps.router)
 import advisor
 app.include_router(advisor.router)
 
+# NEW: account emails (confirm your email, forgot/reset password) and the
+# login guessing limit: /auth/send-verification, /auth/verify-email,
+# /auth/forgot-password, /auth/reset-password
+import accounts
+app.include_router(accounts.router)
+
+# NEW: "Try the demo" - a private throwaway account with sample data: /auth/demo
+import demo
+app.include_router(demo.router)
+
 # AI RATE LIMITING: every endpoint that can trigger a real Claude call
 # (sentiment, bull/bear, advisor chat) costs money per hit, so each user
 # gets a capped number of Claude calls per rolling window. Without this, a
@@ -124,6 +134,7 @@ app.include_router(advisor.router)
 AI_RATE_LIMITS = {
     "analysis": (60, 3600),  # /sentiment + /bullbear, Claude calls only (cache hits are free)
     "chat": (40, 3600),      # /chat messages
+    "demo_chat": (10, 3600), # NEW: /chat for "Try the demo" accounts - anyone can start one
 }
 _ai_call_log = defaultdict(deque)  # (user_id, bucket) -> timestamps of recent calls
 _ai_call_lock = threading.Lock()   # sync routes run in a threadpool, so guard the shared dict
@@ -170,15 +181,17 @@ class TradeCreate(BaseModel):
     # Trade form asks for at least one.
     reason_tags: List[str] = []
 
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 
 class WatchlistAdd(BaseModel):
     ticker: str
 
 class UserSignup(BaseModel):
-    name: str
+    name: str = Field(min_length=1, max_length=100)
     email: EmailStr
-    password: str
+    # NEW: at least 8 characters (bcrypt only reads the first 72 bytes).
+    # Login itself doesn't check length, so older short passwords still work.
+    password: str = Field(min_length=8, max_length=72)
 
 class UserLogin(BaseModel):
     email: EmailStr
@@ -1052,18 +1065,22 @@ def get_trading_patterns(db: Session = Depends(get_db), current_user: User = Dep
 # the frontend can log the user straight in without a separate login step.
 @app.post("/auth/signup", response_model=TokenResponse)
 def signup(payload: UserSignup, db: Session = Depends(get_db)):
-    existing = db.query(User).filter(User.email == payload.email).first()
-    if existing:
+    # NEW: emails are stored lower-case and compared case-insensitively, so
+    # "David@x.com" and "david@x.com" can't become two accounts.
+    if accounts.find_user_by_email(db, payload.email):
         raise HTTPException(status_code=400, detail="An account with this email already exists")
 
     new_user = User(
-        name=payload.name,
-        email=payload.email,
+        name=payload.name.strip(),
+        email=accounts.normalize_email(payload.email),
         hashed_password=hash_password(payload.password)
     )
     db.add(new_user)
     db.commit()
     db.refresh(new_user)
+
+    # NEW: "confirm your email" link - best effort, never blocks signing up.
+    accounts.send_verification_quietly(db, new_user)
 
     token = create_access_token(new_user.id)
     return {"access_token": token}
@@ -1075,10 +1092,15 @@ def signup(payload: UserSignup, db: Session = Depends(get_db)):
 # since that tells an attacker whether a given email has an account here.
 @app.post("/auth/login", response_model=TokenResponse)
 def login(payload: UserLogin, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.email == payload.email).first()
+    # NEW: after 10 wrong passwords for one email in 15 minutes, that email
+    # is locked out until the window passes (accounts.py).
+    accounts.check_login_allowed(payload.email)
+    user = accounts.find_user_by_email(db, payload.email)
     if not user or not verify_password(payload.password, user.hashed_password):
+        accounts.record_login_failure(payload.email)
         raise HTTPException(status_code=401, detail="Incorrect email or password")
 
+    accounts.clear_login_failures(payload.email)
     token = create_access_token(user.id)
     return {"access_token": token}
 
@@ -1087,7 +1109,9 @@ def login(payload: UserLogin, db: Session = Depends(get_db)):
 # whatever token is currently stored client-side.
 @app.get("/auth/me")
 def get_me(current_user: User = Depends(get_current_user)):
-    return {"id": current_user.id, "name": current_user.name, "email": current_user.email}
+    return {"id": current_user.id, "name": current_user.name, "email": current_user.email,
+            # NEW: the frontend shows the demo banner / "confirm your email" prompts from these
+            "email_verified": bool(current_user.email_verified), "is_demo": bool(current_user.is_demo)}
 
 # Saves or updates the logged-in user's survey answers. Same endpoint
 # handles both the initial signup-survey submission and later edits from

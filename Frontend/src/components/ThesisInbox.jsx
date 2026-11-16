@@ -68,7 +68,9 @@ function ReasonsSummary({ summary }) {
 // arrive without a thesis; this is where the user gives one. Answers are
 // final on purpose (the backend enforces it) - a journal is only useful if
 // you can't rewrite why you traded after seeing how it turned out.
-function ThesisInbox({ onAnswered }) {
+// embedded: rendered inside TradeReasonsPage, which owns the topbar and
+// the .content wrapper (NEW - this page and Thesis review were merged).
+function ThesisInbox({ onAnswered, embedded = false }) {
   const [catalog, setCatalog] = useState(null)
   const [trades, setTrades] = useState(null)
   const [summary, setSummary] = useState(null)
@@ -176,21 +178,16 @@ function ThesisInbox({ onAnswered }) {
     </div>
   )
 
+  const page = (children) => (embedded ? children : <>{topbar}<div className="content">{children}</div></>)
+
   if (error || !trades || !catalog) {
-    return (
-      <>
-        {topbar}
-        <div className="content">
-          <p style={{ color: error ? "var(--color-danger)" : "var(--color-text-secondary)" }}>{error || "Loading…"}</p>
-        </div>
-      </>
+    return page(
+      <p style={{ color: error ? "var(--color-danger)" : "var(--color-text-secondary)" }}>{error || "Loading…"}</p>
     )
   }
 
-  return (
+  return page(
     <>
-      {topbar}
-      <div className="content">
         <p className="inbox-intro">
           These trades came in from your brokerage without a thesis. Say why you made each one — be honest,
           including <em>“Don't remember”</em>. <strong>Answers are final</strong>: like a real trading journal, you
@@ -303,7 +300,6 @@ function ThesisInbox({ onAnswered }) {
             )}
           </>
         )}
-      </div>
     </>
   )
 }

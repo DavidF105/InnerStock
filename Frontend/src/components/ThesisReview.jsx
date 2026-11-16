@@ -237,7 +237,10 @@ function ReviewCard({ review, onGraded }) {
   )
 }
 
-function ThesisReview() {
+// embedded: rendered inside TradeReasonsPage (NEW - merged with Trade
+// reasons), which owns the topbar and .content wrapper. onGraded lets App
+// refresh the sidebar badge's due count.
+function ThesisReview({ embedded = false, onGraded }) {
   const [reviews, setReviews] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
@@ -273,6 +276,7 @@ function ThesisReview() {
   function handleGraded(tradeId) {
     setReviews((prev) => prev.filter((r) => r.id !== tradeId))
     setRecentRefreshKey((prev) => prev + 1)
+    onGraded?.()
   }
 
   if (loading) return <p style={{ color: "var(--color-text-secondary)" }}>Loading thesis reviews...</p>
@@ -287,10 +291,10 @@ function ThesisReview() {
     </div>
   )
 
-  return (
+  const page = (children) => (embedded ? children : <>{topbar}<div className="content">{children}</div></>)
+
+  return page(
     <>
-      {topbar}
-      <div className="content">
         {reviews.length === 0 ? (
           <p style={{ color: "var(--color-text-secondary)" }}>Nothing due for review yet.</p>
         ) : (
@@ -345,7 +349,6 @@ function ThesisReview() {
             No theses reviewed yet — grade one once its review date arrives.
           </p>
         )}
-      </div>
     </>
   )
 }

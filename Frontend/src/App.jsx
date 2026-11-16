@@ -4,11 +4,10 @@ import AuthScreen from './components/AuthScreen'
 import SurveyScreen from './components/SurveyScreen'
 import TradeForm from './components/TradeForm'
 import Dashboard from './components/Dashboard'
-import ThesisReview from './components/ThesisReview'
 import ChatScreen from './components/ChatScreen'
 import { apiFetch } from './api'
 import SearchPage from './components/SearchPage'
-import ThesisInbox from './components/ThesisInbox'
+import TradeReasonsPage from './components/TradeReasonsPage'
 import NotificationsPage from './components/NotificationsPage'
 
 function App() {
@@ -27,12 +26,23 @@ function App() {
   // from the brokerage). Shown as a sidebar badge and a dashboard nudge;
   // refreshed after a sync, after answering, and whenever the view changes.
   const [inboxCount, setInboxCount] = useState(0)
+  // NEW: trades whose review date has arrived and still need a grade. The
+  // Trade reasons page now holds both halves (reasons + reviews), so its
+  // sidebar badge counts both. /thesis-reviews does no price lookups, so
+  // this is cheap to refresh alongside the reason count.
+  const [dueCount, setDueCount] = useState(0)
 
   function refreshInboxCount() {
     apiFetch("/trades/needs-thesis/count")
       .then((response) => (response.ok ? response.json() : null))
       .then((data) => {
         if (data) setInboxCount(data.count)
+      })
+      .catch(() => {})
+    apiFetch("/thesis-reviews")
+      .then((response) => (response.ok ? response.json() : null))
+      .then((data) => {
+        if (data) setDueCount(data.reviews.length)
       })
       .catch(() => {})
   }
@@ -117,7 +127,7 @@ function App() {
   return (
     <Layout
       activeView={activeView}
-      inboxCount={inboxCount}
+      inboxCount={inboxCount + dueCount}
       onNavigate={(view) => { setFocusRecapId(null); setActiveView(view) }}
       onOpenRecap={(id) => { setFocusRecapId(id); setActiveView('notifications') }}
       onLogout={handleLogout}
@@ -146,14 +156,19 @@ function App() {
     </div>
   </>
 )}
-      {activeView === 'thesisreview' && (
-        <ThesisReview />
-      )}
       {activeView === 'search' && (
   <SearchPage />
 )}
-      {activeView === 'reasons' && (
-        <ThesisInbox onAnswered={(remaining) => setInboxCount(remaining)} />
+      {(activeView === 'reasons' || activeView === 'thesisreview') && (
+        // 'thesisreview' (the old separate page) opens the review tab
+        <TradeReasonsPage
+          key={activeView}
+          needsReasonCount={inboxCount}
+          dueCount={dueCount}
+          initialTab={activeView === 'thesisreview' ? 'review' : undefined}
+          onAnswered={(remaining) => setInboxCount(remaining)}
+          onGraded={() => setDueCount((n) => Math.max(0, n - 1))}
+        />
       )}
       {activeView === 'advisor' && (
         <ChatScreen />

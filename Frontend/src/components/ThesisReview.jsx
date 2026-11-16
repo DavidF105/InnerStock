@@ -113,9 +113,12 @@ function Scorecard({ card, action }) {
   )
 }
 
-function ReviewCard({ review, onGraded }) {
+// regrade (NEW): the card reopened from "Recently reviewed" to change a
+// grade InnerStock set automatically - same evidence and rules, but it
+// shows the current grade instead of how overdue the review is.
+function ReviewCard({ review, onGraded, regrade = false }) {
   const [card, setCard] = useState(null)
-  const [notes, setNotes] = useState("")
+  const [notes, setNotes] = useState(review.review_notes || "")
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState(null)
   const notesRef = useRef(null)
@@ -166,7 +169,11 @@ function ReviewCard({ review, onGraded }) {
             </span>
           </div>
         </div>
-        <span className={`pill ${due.pillClass}`}>{due.text}</span>
+        {regrade ? (
+          <span className="pill pill-muted">Auto-graded {review.outcome_tag}</span>
+        ) : (
+          <span className={`pill ${due.pillClass}`}>{due.text}</span>
+        )}
       </div>
 
       {/* What the user said at the time - the claim being graded. */}
@@ -246,6 +253,7 @@ function ThesisReview({ embedded = false, onGraded }) {
   const [error, setError] = useState(null)
   const [recentReviews, setRecentReviews] = useState([])
   const [recentRefreshKey, setRecentRefreshKey] = useState(0)
+  const [regradingId, setRegradingId] = useState(null) // recent auto-grade being changed
 
   useEffect(() => {
     apiFetch("/thesis-reviews")
@@ -295,6 +303,13 @@ function ThesisReview({ embedded = false, onGraded }) {
 
   return page(
     <>
+        {/* NEW: grading is automatic now - explain what's left here */}
+        <p className="inbox-intro">
+          When a trade's review date arrives, InnerStock grades it from the numbers: your return against the
+          S&amp;P 500 at the date you chose. What's left below couldn't be judged by price alone, so grade those
+          yourself. Disagree with an automatic grade? Use <strong>Change grade</strong> under Recently reviewed.
+        </p>
+
         {reviews.length === 0 ? (
           <p style={{ color: "var(--color-text-secondary)" }}>Nothing due for review yet.</p>
         ) : (
@@ -313,6 +328,22 @@ function ThesisReview({ embedded = false, onGraded }) {
                   r.outcome_tag === "correct" ? "pill-success" :
                   r.outcome_tag === "incorrect" ? "pill-danger" :
                   "pill-warning"
+
+                if (regradingId === r.id) {
+                  return (
+                    <div key={r.id} style={{ padding: "var(--space-md) 0" }}>
+                      <ReviewCard
+                        review={r}
+                        regrade
+                        onGraded={() => {
+                          setRegradingId(null)
+                          setRecentRefreshKey((prev) => prev + 1)
+                        }}
+                      />
+                      <button className="btn" onClick={() => setRegradingId(null)}>Cancel</button>
+                    </div>
+                  )
+                }
 
                 return (
                   <div key={r.id} className="recent-row">
@@ -333,6 +364,12 @@ function ThesisReview({ embedded = false, onGraded }) {
                     </div>
                     <div className="recent-pills">
                       <span className={`pill ${pillClass}`}>{r.outcome_tag}</span>
+                      {r.auto_graded && (
+                        <>
+                          <span className="pill pill-muted" title="Graded automatically from the numbers at the review date">auto-graded</span>
+                          <button className="btn recent-change-btn" onClick={() => setRegradingId(r.id)}>Change grade</button>
+                        </>
+                      )}
                       {r.graded_against_numbers && (
                         <span className="pill pill-muted" title={`The numbers said ${r.suggested_outcome}`}>against the numbers</span>
                       )}

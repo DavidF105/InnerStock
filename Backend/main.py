@@ -726,16 +726,19 @@ Key Risk: [1 sentence]"""
 @app.get("/thesis-reviews")
 def get_thesis_reviews(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     today = date.today()
+    # NEW: first grade every due trade the numbers can judge (grading.py,
+    # auto_grade_due) - what's left is only what needs the user. This is the
+    # one price lookup here: one cached history download per due ticker,
+    # and only for trades that just came due.
+    grading.auto_grade_due(db, current_user, today)
     due_trades = db.query(Trade).filter(
         Trade.user_id == current_user.id,
         Trade.review_date <= today,
         Trade.outcome_tag.is_(None)
     ).order_by(Trade.review_date, Trade.id).all()
 
-    # No price lookups here any more: the FOMO check and the price/S&P 500
-    # numbers moved to GET /thesis-reviews/{id}/scorecard (grading.py),
-    # which each card loads on its own - so this list returns instantly
-    # instead of waiting on one yfinance download per due trade.
+    # The scorecard numbers for each card still load separately
+    # (GET /thesis-reviews/{id}/scorecard), so this list stays quick.
     return {"reviews": [review_json(trade) for trade in due_trades]}
 
 
@@ -759,6 +762,8 @@ def review_json(trade: Trade) -> dict:
         "graded_against_numbers": grading.contradicts(trade.suggested_outcome, trade.outcome_tag),
         "graded_return_pct": trade.graded_return_pct,
         "graded_benchmark_return_pct": trade.graded_benchmark_return_pct,
+        "graded_at": trade.graded_at.isoformat() if trade.graded_at else None,
+        "auto_graded": bool(trade.auto_graded),
     }
 
 # Returns trades that HAVE been graded (outcome_tag is set), most recent

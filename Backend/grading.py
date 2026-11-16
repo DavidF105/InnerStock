@@ -17,6 +17,7 @@
 #     (graded_return_pct etc.), so "which of my reasons actually make
 #     money" can be answered later without re-downloading prices.
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 from time import monotonic
 
@@ -305,14 +306,64 @@ def apply_grade(db: Session, user: User, trade_id: int, outcome: str, notes) -> 
                    f"add a note explaining why you're grading it \"{outcome}\".",
         )
 
+    _save_grade(trade, outcome, notes, card, auto=False)
+    db.commit()
+    return trade
+
+
+def _save_grade(trade: Trade, outcome: str, notes, card: dict, auto: bool):
     trade.outcome_tag = outcome
     trade.review_notes = notes
     trade.graded_at = datetime.now(timezone.utc).replace(tzinfo=None)
-    trade.suggested_outcome = suggested
+    trade.suggested_outcome = (card.get("suggestion") or {}).get("outcome")
     trade.graded_return_pct = card.get("return_pct")
     trade.graded_benchmark_return_pct = card.get("benchmark_return_pct")
-    db.commit()
-    return trade
+    trade.auto_graded = auto
+
+
+# --- Automatic grading ---------------------------------------------------------------
+# NEW: when a trade's review date arrives, InnerStock grades it itself with
+# the suggested grade, so the user only has to step in to disagree or add a
+# note. Same accountability rules as grading by hand:
+#   - judged at the REVIEW DATE the user committed to - a trade is only
+#     auto-graded once there's a close on or after that date (otherwise the
+#     scorecard would judge it "as of now", which waiting could change)
+#   - trades the numbers can't judge (sells for cash/rebalancing, no price
+#     history) are left for the user to grade
+#   - changing an auto-grade to the opposite of the numbers needs a note,
+#     exactly like a manual grade (apply_grade)
+
+AUTO_GRADE_BATCH = 20  # per request - bounds how long one page load can take
+
+
+def auto_grade_due(db: Session, user: User, today: date = None) -> int:
+    """Grades this user's due trades that the numbers can judge. Returns how many."""
+    today = today or date.today()
+    due = (
+        db.query(Trade)
+        .filter(Trade.user_id == user.id, Trade.review_date <= today, Trade.outcome_tag.is_(None))
+        .order_by(Trade.review_date, Trade.id)
+        .limit(AUTO_GRADE_BATCH)
+        .all()
+    )
+    if not due:
+        return 0
+    # Price history is the slow part (a yfinance download per ticker, cached
+    # 10 min), so the scorecards are worked out in parallel. scorecard()
+    # only reads the trade's own columns - nothing that needs the session.
+    with ThreadPoolExecutor(max_workers=min(8, len(due))) as pool:
+        cards = list(pool.map(lambda t: scorecard(t, today), due))
+
+    graded = 0
+    for trade, card in zip(due, cards):
+        suggestion = card.get("suggestion")
+        if not card.get("available") or not suggestion or card.get("judged_at") != "review_date":
+            continue
+        _save_grade(trade, suggestion["outcome"], None, card, auto=True)
+        graded += 1
+    if graded:
+        db.commit()
+    return graded
 
 
 def describe_grade(trade: Trade) -> str:
@@ -327,4 +378,6 @@ def describe_grade(trade: Trade) -> str:
         text += ")"
     if contradicts(trade.suggested_outcome, trade.outcome_tag):
         text += f" - graded against the numbers, which said {trade.suggested_outcome}"
+    elif trade.auto_graded:
+        text += " - graded automatically from the numbers"
     return text

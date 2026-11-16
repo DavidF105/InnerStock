@@ -81,6 +81,10 @@ class Trade(Base):
     suggested_outcome = Column(String, nullable=True)
     graded_return_pct = Column(Float, nullable=True)
     graded_benchmark_return_pct = Column(Float, nullable=True)
+    # NEW: True when InnerStock graded the trade itself from the numbers on
+    # its review date (grading.auto_grade_due) rather than the user choosing
+    # the grade. Re-grading by hand sets it back to False.
+    auto_graded = Column(Boolean, nullable=False, server_default=false())
     created_at = Column(DateTime, server_default=func.now())
 
     # Where this trade came from: "manual" (logged through POST /trades),

@@ -711,6 +711,16 @@ def build_suggestions(db, user):
         found.append((85, None, f"Review my {due} due trade{'s' if due != 1 else ''}",
                       "Walk me through my trades that are due for review: was each thesis right, how did they do against the S&P 500, and what should I learn?"))
 
+    # NEW: trades InnerStock graded automatically in the last week - worth a
+    # look, since the user never saw those grades being made.
+    week_ago = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=7)
+    auto = db.query(Trade).filter(Trade.user_id == user.id, Trade.auto_graded.is_(True), Trade.graded_at >= week_ago).all()
+    if auto:
+        tickers = ", ".join(sorted({t.ticker for t in auto}))
+        label = "What my new grade says" if len(auto) == 1 else f"What my {len(auto)} new grades say"
+        found.append((82, None, label,
+                      f"InnerStock just graded {len(auto)} of my trades automatically ({tickers}). What do they say about my reasoning, and does any grade look wrong to you?"))
+
     for h in holdings:
         move = h["day_gain_loss_percent"]
         if abs(move) >= 4:

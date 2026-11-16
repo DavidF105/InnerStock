@@ -314,3 +314,10 @@ def test_new_user_gets_generic_suggestions(client, claude):
     newbie = signup(client, "new@example.com")
     labels = suggestions(client, newbie)
     assert labels == ["How should I think about my next buy?"]
+
+
+def test_suggestions_mention_fresh_auto_grades(client, alice, history):
+    from test_auto_grading import winning_trade
+    winning_trade(client, alice, history)
+    client.get("/thesis-reviews", headers=alice)  # auto-grades it
+    assert "What my new grade says" in suggestions(client, alice)

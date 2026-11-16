@@ -16,7 +16,7 @@ from models import Trade
 # so FastAPI can validate it automatically before our code even runs
 from pydantic import BaseModel
 from datetime import date
-from models import Trade, PriceCache, User, UserProfile, ChatMessage, SentimentCache, Watchlist
+from models import Trade, PriceCache, User, UserProfile, ChatMessage, SentimentCache, Watchlist, EarningsNotification, EarningsRecap
 from datetime import date, datetime, timedelta, time
 
 #FOR THE CLAUDE API
@@ -100,6 +100,12 @@ app.include_router(holdings_news.router)
 # every holder.
 import earnings_recaps
 app.include_router(earnings_recaps.router)
+
+# NEW: the advisor chat - Claude with read-only tools (prices, performance,
+# news, earnings, the user's own trades, what-if trades) and suggested
+# questions built from the user's current situation: /chat, /chat/suggestions
+import advisor
+app.include_router(advisor.router)
 
 # AI RATE LIMITING: every endpoint that can trigger a real Claude call
 # (sentiment, bull/bear, advisor chat) costs money per hit, so each user
@@ -1138,9 +1144,6 @@ def get_profile(db: Session = Depends(get_db), current_user: User = Depends(get_
         "biggest_fear": profile.biggest_fear,
     }
 
-class ChatMessageIn(BaseModel):
-    message: str
-
 # Gathers everything the advisor needs to answer grounded, personalized
 # questions: the user's stated profile, current holdings, trading-pattern
 # stats, and a sample of recent trades with their theses. Rebuilt fresh on
@@ -1226,35 +1229,39 @@ Non-FOMO trades correct rate: {patterns_data['fomo_vs_non_fomo']['non_fomo']['co
         )
     fundamentals_summary = "\n".join(fundamentals_lines) or "No fundamentals data available."
 
-    return f"""You are InnerStock's investing advisor.
+    # NEW: extra snapshot facts for the tool-using advisor (advisor.py),
+    # so it knows what's going on before deciding what to look up.
+    today = date.today()
+    watchlist = [w.ticker for w in db.query(Watchlist).filter(Watchlist.user_id == current_user.id).all()]
+    due_reviews = db.query(Trade).filter(
+        Trade.user_id == current_user.id, Trade.review_date <= today, Trade.outcome_tag.is_(None)
+    ).count()
+    unread_recaps = (
+        db.query(EarningsNotification, EarningsRecap)
+        .join(EarningsRecap, EarningsNotification.recap_id == EarningsRecap.id)
+        .filter(EarningsNotification.user_id == current_user.id, EarningsNotification.read_at.is_(None))
+        .order_by(EarningsRecap.report_date.desc())
+        .limit(5)
+        .all()
+    )
+    recaps_summary = "\n".join(
+        f"- {n.display_ticker} reported {r.report_date}: {r.headline} ({r.sentiment})" for n, r in unread_recaps
+    ) or "None."
 
-Be conversational, practical, and concise. Match the depth of your answer to the user's question.
+    # Sector exposure by portfolio weight, from the same PriceCache rows
+    # the fundamentals block reads.
+    sector_weights = {}
+    for h in holdings_data["holdings"]:
+        cached_price = db.query(PriceCache).filter(PriceCache.ticker == h["ticker"]).first()
+        sector = (cached_price.sector if cached_price else None) or "Unknown / fund"
+        sector_weights[sector] = sector_weights.get(sector, 0) + h["percentage"]
+    sector_summary = ", ".join(
+        f"{sector} {weight:.0f}%" for sector, weight in sorted(sector_weights.items(), key=lambda kv: -kv[1])
+    ) or "n/a"
 
-Default behavior:
-- Keep answers under 120 words unless the user asks for more detail.
-- Simple factual questions: 1–2 sentences.
-- Portfolio questions: 2–5 short bullet points.
-- Comparisons or explanations: 1–3 short paragraphs.
-- Give detailed analysis only when the user explicitly requests it (e.g. "analyze", "explain in depth", "walk me through", or "give me a detailed report").
-
-Use only the user's profile, holdings, fundamentals, trades, or behavioral patterns that are relevant to the current question. Don't force portfolio references into general investing questions.
-
-If important information is missing, ask one brief clarifying question instead of making assumptions.
-
-Response formatting:
-- Use Markdown naturally.
-- Start with a one-sentence direct answer.
-- Use at most 2-3 headings only when they improve readability.
-- Keep paragraphs to 1-2 sentences.
-- Use bullet points for lists.
-- Never center text or stack multiple bold headings.
-- If giving a personalized insight, put it under a short "For your portfolio" section.
-
-When relevant, help the user recognize patterns in their own investing behavior—such as concentration risk, FOMO, or conviction consistency—using their actual data.
-
-The user's stated reasons for their trades (below) are the best evidence of how they actually invest. Compare what they say they do with what they do: e.g. which reasons tend to work for them, whether they often can't remember why they traded, or whether their stated style (profile) matches their real reasons. Treat reasons written in hindsight as less reliable.
-
-Do not give generic investing advice. Ground your answers in the real data below whenever relevant. You are not a licensed financial advisor; make that clear if the user asks for concrete buy/sell recommendations.
+    # The instructions themselves are advisor.ADVISOR_INSTRUCTIONS; this is
+    # only the facts block that follows them.
+    return f"""Today's date: {today.isoformat()}
 
 === USER PROFILE ===
 {profile_summary}
@@ -1275,82 +1282,24 @@ Average conviction across positions: {holdings_data['avg_conviction']}/5
 
 === WHY THIS USER TRADES (their own stated reasons) ===
 {reasons_summary}
+
+=== PORTFOLIO SHAPE ===
+Sector exposure by weight: {sector_summary}
+Note: holding values are in each listing's own currency (TSX .TO listings in CAD, US listings in USD) and the total adds them as-is, so weights are approximate when both are held.
+
+=== WATCHLIST ===
+{", ".join(watchlist) or "Empty."}
+
+=== OPEN ITEMS ===
+Trades due for review (review date passed, not graded yet): {due_reviews}
+Unread earnings recaps for holdings:
+{recaps_summary}
 """
 
-# The advisor chat. Saves the user's message, rebuilds full context fresh,
-# sends the conversation history + context to Claude, saves and returns
-# the reply. PROTECTED + SCOPED - only ever sees and stores this user's
-# own data and conversation.
-@app.post("/chat")
-def chat(payload: ChatMessageIn, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    # Checked before saving anything, so a rate-limited message isn't
-    # stored in history without a reply to go with it.
-    enforce_ai_rate_limit(current_user.id, "chat")
-
-    # Save the user's new message first - stored immediately, before we
-    # even talk to Claude, so it's never lost even if something below fails.
-    user_message = ChatMessage(user_id=current_user.id, role="user", content=payload.message)
-    db.add(user_message)
-    db.commit()
-
-    # Pull recent conversation history (capped at 40, to avoid unbounded
-    # token growth as a conversation gets long) so Claude has continuity
-    # across turns - this is what gives the chatbot "memory."
-    history = (
-        db.query(ChatMessage)
-        .filter(ChatMessage.user_id == current_user.id)
-        .order_by(ChatMessage.created_at.asc())
-        .limit(40)
-        .all()
-    )
-
-    # Rebuilt fresh every message (not cached) since holdings/stats can
-    # change mid-conversation, e.g. if the user logs a new trade while chatting.
-    context = build_advisor_context(db, current_user)
-
-    # Reshape DB rows into the plain {role, content} format Claude's API
-    # expects - strips out fields like id/created_at that Claude doesn't need.
-    messages = [{"role": m.role, "content": m.content} for m in history]
-
-    try:
-        response = claude_client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=350,
-            system=context,       # background knowledge - invisible to the
-                                   # user, shapes every answer without being
-                                   # part of the visible conversation
-            messages=messages,    # the actual back-and-forth, including
-                                   # the new message just saved above
-        )
-        reply_text = response.content[0].text
-
-        # Log real token usage and estimated cost for this call, so actual
-        # spend can be tracked during testing instead of guessed at.
-        input_tokens = response.usage.input_tokens
-        output_tokens = response.usage.output_tokens
-        input_cost = (input_tokens / 1_000_000) * 1.00
-        output_cost = (output_tokens / 1_000_000) * 5.00
-        total_cost = input_cost + output_cost
-        print(
-            f"[chat cost] user_id={current_user.id} "
-            f"input_tokens={input_tokens} output_tokens={output_tokens} "
-            f"estimated_cost=${total_cost:.5f}"
-        )
-
-    except Exception as e:
-        print(f"Claude API call failed for chat: {e}")
-        raise HTTPException(status_code=500, detail="Could not generate a response right now")
-
-    # Save Claude's reply too, tagged as "assistant" - this is what makes
-    # it show up in history the NEXT time this function runs, which is how
-    # the conversation actually persists and grows over time.
-    assistant_message = ChatMessage(user_id=current_user.id, role="assistant", content=reply_text)
-    db.add(assistant_message)
-    db.commit()
-
-    # Frontend only needs the new reply here - it already has (or can
-    # separately fetch) everything that came before.
-    return {"reply": reply_text}
+# NEW: the advisor chat itself (POST /chat, plus GET /chat/suggestions)
+# lives in advisor.py - Claude with read-only tools that look up prices,
+# news, earnings and the user's own trades. build_advisor_context above
+# still supplies the per-message snapshot it starts from.
 
 
 # Returns the full saved conversation for the logged-in user - no Claude

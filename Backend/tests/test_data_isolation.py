@@ -30,6 +30,7 @@ PROTECTED_GET_ROUTES = [
     "/watchlist",
     "/holdings/news",
     "/notifications",
+    "/chat/suggestions",
     "/auth/me",
 ]
 

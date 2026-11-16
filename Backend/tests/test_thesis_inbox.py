@@ -238,3 +238,44 @@ def test_answers_update_the_advisors_picture_of_the_user(client, alice, db_sessi
     assert "=== WHY THIS USER TRADES" in after
     assert "Tip / social media: 1 trade(s), avg conviction 2.0/5" in after
     assert 'reasons: Tip / social media; thesis: "Friend said it would squeeze"' in after
+
+
+# --- Review dates measured from the trade (NEW) ------------------------------------------
+
+def test_review_months_counts_from_each_trades_own_date(client, alice, db_session_factory):
+    import thesis
+    uid = user_id(db_session_factory)
+    ids = [synced_trade(db_session_factory, uid, days_ago=d) for d in (10, 200)]
+    assert answer(client, alice, ids, reason_tags=["dca"], review_months=3).status_code == 200
+    for trade_id in ids:
+        trade = get_trade(db_session_factory, trade_id)
+        assert trade.review_date == thesis.add_months(trade.trade_date, 3)
+
+
+def test_old_synced_trade_is_graded_right_away(client, alice, db_session_factory, history):
+    # Bought 200 days ago with a 3-month review: that date has passed, so
+    # the review list auto-grades it straight away.
+    uid = user_id(db_session_factory)
+    trade_id = synced_trade(db_session_factory, uid, ticker="AAPL", days_ago=200, price=100)
+    trade_date = TODAY - timedelta(days=200)
+    history["AAPL"] = [(trade_date + timedelta(days=d), 100 + d * 0.2) for d in range(0, 201)]
+    history["SPY"] = [(trade_date + timedelta(days=d), 400.0) for d in range(0, 201)]
+    assert answer(client, alice, [trade_id], review_months=3).status_code == 200
+
+    assert client.get("/thesis-reviews", headers=alice).json()["reviews"] == []
+    graded = get_trade(db_session_factory, trade_id)
+    assert graded.outcome_tag == "correct" and graded.auto_graded is True
+
+
+def test_add_months_clamps_to_month_end():
+    import thesis
+    assert thesis.add_months(date(2026, 1, 31), 1) == date(2026, 2, 28)
+    assert thesis.add_months(date(2028, 1, 31), 1) == date(2028, 2, 29)
+    assert thesis.add_months(date(2026, 11, 15), 3) == date(2027, 2, 15)
+    assert thesis.add_months(date(2026, 12, 31), 12) == date(2027, 12, 31)
+
+
+def test_review_months_is_validated(client, alice, db_session_factory):
+    trade_id = synced_trade(db_session_factory, user_id(db_session_factory))
+    assert answer(client, alice, [trade_id], review_months=0).status_code == 422
+    assert answer(client, alice, [trade_id], review_months=61).status_code == 422

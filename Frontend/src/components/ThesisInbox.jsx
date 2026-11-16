@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react"
 import { apiFetch } from "../api"
 import ReasonChips from "./ReasonChips"
-import { DONT_REMEMBER, REVIEW_OPTIONS, dateMonthsFromToday } from "../reasons"
+import { DONT_REMEMBER, REVIEW_OPTIONS, dateMonthsAfter } from "../reasons"
 
 // How many unanswered trades to render at once - a first brokerage sync can
 // bring in hundreds, and the newest ones matter most.
@@ -60,6 +60,26 @@ function ReasonsSummary({ summary }) {
           <span>Explained in hindsight (7+ days later): <strong>{summary.hindsight_rate}%</strong></span>
         </div>
       </div>
+    </div>
+  )
+}
+
+// NEW: says when the chosen review lands - or that it's already passed,
+// in which case the trade is graded as soon as it's answered.
+function ReviewDateHint({ trade, reviewKey }) {
+  const months = REVIEW_OPTIONS.find((o) => o.key === reviewKey)?.months
+  if (!months) return null
+  const reviewDate = dateMonthsAfter(trade.trade_date, months)
+  const [y, m, d] = reviewDate.split("-").map(Number)
+  const day = new Date(y, m - 1, d)
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  const label = day.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })
+  return (
+    <div className="review-date-hint">
+      {day <= today
+        ? `That's ${label}, which has already passed, so it'll be graded right away from the numbers.`
+        : `It'll be graded on ${label}.`}
     </div>
   )
 }
@@ -144,7 +164,10 @@ function ThesisInbox({ onAnswered, embedded = false }) {
           reason_tags: tags,
           thesis_text: dontRemember ? null : draft.thesis.trim(),
           conviction_score: dontRemember ? null : draft.conviction,
-          review_date: !dontRemember && reviewMonths ? dateMonthsFromToday(reviewMonths) : null,
+          // NEW: months after each trade's OWN date (the backend works out
+          // the date per trade), so an old trade whose date has passed is
+          // graded right away instead of months from now.
+          review_months: !dontRemember && reviewMonths ? reviewMonths : null,
         }),
       })
       const result = await response.json().catch(() => null)
@@ -254,7 +277,7 @@ function ThesisInbox({ onAnswered, embedded = false }) {
                               </div>
                             </div>
                             <div className="field">
-                              <label>Check back on this trade in</label>
+                              <label>Grade this trade how long after you made it?</label>
                               <div className="reason-chips">
                                 {REVIEW_OPTIONS.map((o) => (
                                   <button key={o.key} type="button"
@@ -264,6 +287,7 @@ function ThesisInbox({ onAnswered, embedded = false }) {
                                   </button>
                                 ))}
                               </div>
+                              <ReviewDateHint trade={trade} reviewKey={draft.review} />
                             </div>
                           </div>
                         </>

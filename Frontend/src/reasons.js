@@ -13,6 +13,18 @@ export const REVIEW_OPTIONS = [
   { key: "1y", label: "1 year", months: 12 },
 ]
 
+// NEW: YYYY-MM-DD, `months` after a YYYY-MM-DD date - same rule as the
+// backend's thesis.add_months (Jan 31 + 1 month -> end of February).
+export function dateMonthsAfter(isoDate, months) {
+  const [y, m, d] = isoDate.split("-").map(Number)
+  const monthIndex = m - 1 + months
+  const year = y + Math.floor(monthIndex / 12)
+  const month = monthIndex % 12
+  const lastDay = new Date(year, month + 1, 0).getDate()
+  const pad = (n) => String(n).padStart(2, "0")
+  return `${year}-${pad(month + 1)}-${pad(Math.min(d, lastDay))}`
+}
+
 // YYYY-MM-DD, `months` from today (local date, like the date inputs use).
 export function dateMonthsFromToday(months) {
   const d = new Date()

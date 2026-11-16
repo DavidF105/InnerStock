@@ -148,6 +148,20 @@ class ThesisAnswer(BaseModel):
     thesis_text: Optional[str] = None
     conviction_score: Optional[int] = Field(default=None, ge=1, le=5)
     review_date: Optional[date] = None
+    # NEW: "grade it N months after the trade" - each trade gets its OWN
+    # date (trade_date + N months), so a batch of buys answered together
+    # still reviews each one on its own schedule, and an old synced trade
+    # whose date has already passed is graded right away (auto-grading).
+    # Wins over review_date when both are sent.
+    review_months: Optional[int] = Field(default=None, ge=1, le=60)
+
+
+def add_months(day: date, months: int) -> date:
+    """Same day-of-month `months` later, clamped to the month's end (Jan 31 + 1 -> Feb 28/29)."""
+    month_index = day.month - 1 + months
+    year, month = day.year + month_index // 12, month_index % 12 + 1
+    next_month_first = date(year + (month == 12), month % 12 + 1, 1)
+    return date(year, month, min(day.day, (next_month_first - timedelta(days=1)).day))
 
 
 @router.put("/thesis")
@@ -184,7 +198,7 @@ def answer_thesis(answer: ThesisAnswer, db: Session = Depends(get_db), current_u
         trade.reason_tags = ",".join(tags)
         trade.thesis_text = thesis_text
         trade.conviction_score = answer.conviction_score
-        trade.review_date = answer.review_date
+        trade.review_date = add_months(trade.trade_date, answer.review_months) if answer.review_months else answer.review_date
         trade.thesis_written_at = written_at
     db.commit()
 

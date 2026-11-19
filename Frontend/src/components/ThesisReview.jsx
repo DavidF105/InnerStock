@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from "react"
+import StockLogo from "./StockLogo"
 import { LineChart, Line, ResponsiveContainer, ReferenceLine, XAxis, YAxis, Tooltip } from "recharts"
 import { apiFetch } from "../api"
 import { IconBolt, IconScale } from "@tabler/icons-react"
@@ -161,7 +162,7 @@ function ReviewCard({ review, onGraded, regrade = false }) {
     <div className="review-card">
       <div className="review-top">
         <div className="review-ticker">
-          <div className="ticker-badge">{review.ticker.slice(0, 2)}</div>
+          <StockLogo ticker={review.ticker} />
           <div>
             <span className="ticker-name">{review.ticker}</span>
             <span className={`pill ${review.action === "buy" ? "pill-success" : "pill-danger"}`} style={{ marginLeft: "6px" }}>

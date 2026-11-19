@@ -1,5 +1,6 @@
 import { useState, Fragment } from "react"
 import SentimentBadge from "./SentimentBadge"
+import StockLogo from "./StockLogo"
 import BullBearPanel from "./BullBearPanel"
 import { IconAlertTriangle } from "@tabler/icons-react"
 
@@ -106,7 +107,7 @@ function HoldingsTable({ holdings }) {
                 <tr>
                   <td>
                     <div className="ticker-cell">
-                      <div className="ticker-badge">{h.ticker.slice(0, 2)}</div>
+                      <StockLogo ticker={h.ticker} />
                       <div>
                         <div className="ticker-name">{h.ticker}</div>
                         <div className="ticker-shares">{h.shares.toFixed(4)} sh</div>

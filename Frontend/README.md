@@ -1,6 +1,6 @@
 # InnerStock frontend
 
-React 19 + Vite. See the [main README](../README.md) for what the app does and how to run it, and [`CLAUDE.md`](../CLAUDE.md) for architecture notes.
+React 19 + Vite. See the [main README](../README.md) for what the app does.
 
 ```bash
 npm install

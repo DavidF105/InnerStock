@@ -209,7 +209,7 @@ RECAP_SCHEMA = {
 
 
 def _claude_client():
-    # The app's one Anthropic client lives in main.py (see CLAUDE.md).
+    # The app's one Anthropic client lives in main.py.
     # Imported here at call time because main.py imports this module.
     import main
     return main.claude_client

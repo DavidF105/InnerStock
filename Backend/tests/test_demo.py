@@ -95,3 +95,20 @@ def test_demo_advisor_has_a_smaller_allowance(client, monkeypatch):
     headers = start_demo(client)
     client.post("/chat", headers=headers, json={"message": "hi"})
     assert calls == ["demo_chat"]
+
+
+def test_demo_fomo_buy_lands_on_a_real_hot_day(client, history):
+    # A real run-up in the window: the "Fear of missing out" buy is moved
+    # onto it (at the opening bell), so the FOMO check has a real chase.
+    from test_fomo import sessions_ending, weekdays_after, with_runup
+    today = date.today()
+    hot = sessions_ending(today - timedelta(days=160), 1)[0]
+    top = with_runup(hot, 15, step=0.005, sessions=220)
+    history["AMD"] = top + [(d, top[-1][1]) for d in weekdays_after(hot, 200) if d <= today]
+    headers = start_demo(client)
+
+    amd = next(t for t in client.get("/trades", headers=headers).json() if t["ticker"] == "AMD")
+    assert amd["trade_time"] == "09:40:00"
+    assert hot - timedelta(days=7) <= date.fromisoformat(amd["trade_date"]) <= hot
+    record = client.get("/fomo/summary", headers=headers).json()["record"]
+    assert record["groups"]["chasing"]["count"] == 1 and record["self_tagged_caught"] == 1

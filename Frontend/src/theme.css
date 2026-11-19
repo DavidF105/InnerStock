@@ -1483,3 +1483,73 @@ input, select, textarea, button {
 .recap-email { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-xs); margin-top: var(--space-md); }
 .recap-email .btn { padding: 6px 12px; font-size: var(--text-xs); }
 .recap-email-note { font-size: var(--text-xs); color: var(--color-text-secondary); }
+
+/* =========================================================================
+   NEW: FOMO check (FomoCheck.jsx, FomoCard.jsx) - Backend/fomo.py
+   ========================================================================= */
+.fomo-check {
+  margin-top: var(--space-md);
+  padding: var(--space-md);
+  border: 1px solid var(--color-border);
+  border-left: 3px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  font-size: var(--text-sm);
+}
+.fomo-check.fomo-chasing { border-left-color: var(--color-danger); }
+.fomo-check.fomo-warm { border-left-color: var(--color-warning); }
+.fomo-check.fomo-calm { border-left-color: var(--color-success); }
+.fomo-check-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-sm); margin-bottom: var(--space-sm); }
+.fomo-check-title { display: inline-flex; align-items: center; gap: 6px; font-weight: var(--font-weight-medium); }
+.fomo-badge { text-transform: none; white-space: nowrap; }
+.fomo-signals { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.fomo-signals li { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: baseline; color: var(--color-text-secondary); }
+.fomo-signals strong { color: var(--color-text-primary); font-weight: var(--font-weight-medium); }
+.fomo-points { margin-left: auto; font-size: var(--text-xs); color: var(--color-text-muted); font-variant-numeric: tabular-nums; }
+.fomo-quiet { margin: 0; color: var(--color-text-secondary); font-size: var(--text-sm); }
+.fomo-stats { margin-top: var(--space-sm); font-size: var(--text-xs); color: var(--color-text-muted); }
+.fomo-record { margin-top: var(--space-sm); padding-top: var(--space-sm); border-top: 1px solid var(--color-border); color: var(--color-text-primary); }
+.fomo-nudge {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-sm);
+  margin-top: var(--space-sm); padding: 8px 10px; border-radius: var(--radius-sm);
+  background: var(--color-warning-bg); font-size: var(--text-sm);
+}
+.fomo-nudge .btn { padding: 6px 12px; font-size: var(--text-xs); }
+.fomo-line.fomo-chasing { color: var(--color-danger); background: var(--color-danger-bg); }
+.fomo-line.fomo-dip { color: var(--color-text-secondary); background: var(--color-surface-alt); }
+.fomo-week { margin-left: 4px; opacity: 0.85; }
+
+/* Search page: "Am I chasing this?" */
+.fomo-ask {
+  display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-sm);
+  margin-top: var(--space-lg); padding: var(--space-md);
+  border: 1px dashed var(--color-border-strong); border-radius: var(--radius-md);
+}
+.fomo-ask > div { display: flex; flex-direction: column; gap: 2px; flex: 1 1 240px; font-size: var(--text-sm); }
+.fomo-ask > div span { color: var(--color-text-secondary); font-size: var(--text-xs); }
+.fomo-ask input {
+  width: 170px; max-width: 100%; padding: 8px 10px; border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border); background: var(--color-surface-alt); color: var(--color-text-primary);
+}
+
+/* Dashboard: "How you buy" */
+.fomo-card { margin-top: var(--space-lg); }
+.fomo-card .card-head h2 { display: inline-flex; align-items: center; gap: 6px; }
+.fomo-card-body { display: grid; grid-template-columns: minmax(180px, 1fr) 2fr; gap: var(--space-lg); padding: var(--space-md); align-items: start; }
+.fomo-tax-value { font-size: var(--text-xl); font-weight: var(--font-weight-medium); font-variant-numeric: tabular-nums; }
+.fomo-tax-value.negative, .fomo-table td.negative { color: var(--color-danger); }
+.fomo-tax-value.positive, .fomo-table td.positive { color: var(--color-success); }
+.fomo-table { width: 100%; border-collapse: collapse; font-size: var(--text-sm); font-variant-numeric: tabular-nums; }
+.fomo-table th { text-align: left; font-weight: var(--font-weight-medium); font-size: var(--text-xs); color: var(--color-text-muted); padding: 0 8px 6px 0; }
+.fomo-table td { padding: 6px 8px 6px 0; border-top: 1px solid var(--color-border); }
+.fomo-table tr.empty td { color: var(--color-text-muted); }
+.fomo-card-notes { padding: 0 var(--space-md) var(--space-md); font-size: var(--text-sm); color: var(--color-text-secondary); }
+.fomo-card-notes p { margin: 0 0 6px; }
+.fomo-card-notes strong { color: var(--color-text-primary); }
+.fomo-recent { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--color-border); }
+.fomo-recent li { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; padding: 10px var(--space-md); border-bottom: 1px solid var(--color-border); font-size: var(--text-sm); }
+.fomo-recent li:last-child { border-bottom: none; }
+.fomo-recent-summary { flex-basis: 100%; color: var(--color-text-secondary); font-size: var(--text-xs); }
+@media (max-width: 700px) {
+  .fomo-card-body { grid-template-columns: 1fr; }
+}

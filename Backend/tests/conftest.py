@@ -90,6 +90,23 @@ def history(monkeypatch):
 
 
 @pytest.fixture
+def volumes(monkeypatch):
+    """Fake daily trading volume for the FOMO check: volumes["AAPL"] = {date: shares}.
+
+    Replaces grading.fetch_daily_volumes (the history fixture covers closes).
+    A ticker that isn't in the table has no volume data, so the volume
+    signal simply doesn't fire.
+    """
+    table = {}
+
+    def fake_fetch_daily_volumes(ticker, start, end):
+        return {d: v for d, v in table.get(ticker.upper(), {}).items() if start <= d <= end}
+
+    monkeypatch.setattr(grading, "fetch_daily_volumes", fake_fetch_daily_volumes)
+    return table
+
+
+@pytest.fixture
 def market_events(monkeypatch):
     """Fake yfinance data for /holdings/news: profiles and news per ticker.
 
@@ -151,19 +168,13 @@ def outbox(monkeypatch):
 
 
 @pytest.fixture
-def client(db_session_factory, prices, history, market_events, recap_writer, outbox, monkeypatch):
+def client(db_session_factory, prices, history, volumes, market_events, recap_writer, outbox, monkeypatch):
     def override_get_db():
         db = db_session_factory()
         try:
             yield db
         finally:
             db.close()
-
-    # /thesis-reviews runs a FOMO check that downloads price history from
-    # yfinance - stub it out so tests stay offline.
-    monkeypatch.setattr(
-        main, "check_fomo_for_trade", lambda trade: {"fomo_flag": False, "reason": "stubbed in tests"}
-    )
 
     # In-memory limits are global; start every test with a clean slate.
     accounts._login_failures.clear()

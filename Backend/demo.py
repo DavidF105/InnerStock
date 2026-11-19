@@ -26,6 +26,7 @@ from time import monotonic
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
+import fomo
 import grading
 import thesis
 from auth import create_access_token, hash_password
@@ -128,6 +129,32 @@ def _real_prices(today: date) -> dict:
     return dict(zip(tickers, histories))
 
 
+# NEW: the buy tagged "Fear of missing out" is placed on a REAL hot day for
+# that stock (the highest FOMO score in this window of days ago, bought at
+# the opening bell), so the demo's FOMO check has a genuine chase to show.
+# If no day in the window was even "warm", it stays on its default date.
+FOMO_DEMO_WINDOW = (120, 200)
+FOMO_DEMO_TIME = time(9, 40)
+
+
+def _hottest_day(ticker: str, closes: list, today: date):
+    if not closes:
+        return None
+    start = closes[0][0]
+    volumes = grading.fetch_daily_volumes(ticker, start, today)
+    benchmark = grading.benchmark_for(ticker)
+    bench = grading.fetch_daily_closes(benchmark[0], start, today) if benchmark else []
+    best = None
+    for day, close in closes:
+        if not FOMO_DEMO_WINDOW[0] <= (today - day).days <= FOMO_DEMO_WINDOW[1]:
+            continue
+        result = fomo.score_buy(trade_date=day, trade_time=FOMO_DEMO_TIME, price=close, quantity=0,
+                                closes=closes, volumes=volumes, bench_closes=bench)
+        if result["band"] in ("warm", "chasing") and (not best or result["score"] > best[1]):
+            best = (day, result["score"])
+    return best[0] if best else None
+
+
 def seed(db: Session, user: User, today: date = None):
     today = today or date.today()
     histories = _real_prices(today)
@@ -139,12 +166,19 @@ def seed(db: Session, user: User, today: date = None):
     to_grade = []
     for days_ago, ticker, action, qty, reasons, thesis_text, conviction, review_months, user_grades, fallback in DEMO_TRADES:
         trade_day = today - timedelta(days=days_ago)
+        trade_time = time(10, 30)
+        if reasons and "fomo" in reasons:
+            hot_day = _hottest_day(ticker, histories.get(ticker) or [], today)
+            if hot_day:
+                trade_day, trade_time = hot_day, FOMO_DEMO_TIME
         close = grading.close_on_or_before(histories.get(ticker) or [], trade_day)
         price = round(close[1], 2) if close else fallback
+        if close:
+            trade_day = close[0]  # a weekend date moves to the last trading day
         synced = reasons is None
         trade = Trade(
             user_id=user.id, ticker=ticker, action=action, quantity=qty, price_per_share=price,
-            trade_date=trade_day, trade_time=time(10, 30),
+            trade_date=trade_day, trade_time=trade_time,
             source="snaptrade" if synced else "manual",
             thesis_text=thesis_text, conviction_score=conviction,
             reason_tags=",".join(reasons) if reasons else None,

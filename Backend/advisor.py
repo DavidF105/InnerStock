@@ -31,6 +31,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+import fomo
 import grading
 import holdings_news as hn
 import thesis
@@ -75,7 +76,7 @@ How to work:
 - Ground what you say in numbers you actually have, and make clear where they come from (for example "down 12% over 3 months while the S&P 500 is up 4%"). If a lookup fails or data is missing, say so plainly. Never invent prices, dates, figures or news.
 - Tie answers back to the user's own record whenever it's relevant: what their thesis for a position was and whether it still holds, how trades made for the same reason have gone, whether their conviction scores have been well calibrated, FOMO flags, concentration, and grades they gave against the evidence. Point out patterns they may not see, kindly but directly.
 - Give your actual read. Lay out the reasoning and, for judgment calls, what would change your mind. One short line on uncertainty is enough when it matters - no boilerplate disclaimers. Weigh options against their profile (risk tolerance, horizon, goals, biggest fear).
-- For "should I buy/sell X" questions, check the facts (snapshot, performance, news, earnings), their history with that stock or that kind of reason, and use simulate_trade to show what it would do to their portfolio. Then give a clear view of the case for and against, and what a sensible next step would be.
+- For "should I buy/sell X" questions, check the facts (snapshot, performance, news, earnings), their history with that stock or that kind of reason, run check_fomo on buys (if it says chasing, lead with that and their own record of chasing), and use simulate_trade to show what it would do to their portfolio. Then give a clear view of the case for and against, and what a sensible next step would be.
 - You can't place trades or see their brokerage beyond what's logged in InnerStock.
 
 Style:
@@ -145,6 +146,18 @@ TOOLS = [
                 "dollars": {"type": "number", "description": "Amount in the listing's currency, instead of shares."},
             },
             "required": ["ticker", "action"],
+        },
+    },
+    {
+        "name": "check_fomo",
+        "description": "InnerStock's FOMO check for buying a ticker right now (or on a given date): a 0-100 score and band (chasing / warm / calm / dip) from the stock's run-up vs the market measured against its own normal weekly move, closeness to its 20-day high, volume spike, one-day jumps, the time of day, size vs the user's usual buy, and whether they're buying back something they sold higher. Also returns the user's own record: how their past chasing buys did vs the S&P 500, the FOMO tax in dollars, and how often the stock was cheaper a week later. Use it whenever the user is thinking about buying something that has been moving.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "ticker": _ticker_schema(),
+                "dollars": {"type": "number", "description": "How much they're thinking of buying, if known (checks size vs their usual)."},
+            },
+            "required": ["ticker"],
         },
     },
 ]
@@ -473,6 +486,18 @@ def tool_simulate_trade(ctx, ticker, action, shares=None, dollars=None):
     }
 
 
+def tool_check_fomo(ctx, ticker, dollars=None):
+    ticker = _clean_ticker(ticker)
+    try:
+        result = fomo.check_entry(ctx.db, ctx.user, ticker)
+        if dollars and result["price"]:
+            result = fomo.check_entry(ctx.db, ctx.user, ticker, price=result["price"], quantity=float(dollars) / result["price"])
+    except HTTPException as e:
+        raise ToolError(str(e.detail))
+    result["record"] = {k: v for k, v in result["record"].items() if k != "groups"} |         {"chasing": result["record"]["groups"]["chasing"], "calm": result["record"]["groups"]["calm"]}
+    return result
+
+
 _TOOL_FUNCTIONS = {
     "get_stock_snapshot": lambda ctx, a: tool_stock_snapshot(ctx, a.get("ticker")),
     "get_price_performance": lambda ctx, a: tool_price_performance(ctx, a.get("ticker")),
@@ -482,6 +507,7 @@ _TOOL_FUNCTIONS = {
     "get_trade_review": lambda ctx, a: tool_trade_review(ctx, a.get("trade_id")),
     "get_portfolio_breakdown": lambda ctx, a: tool_portfolio_breakdown(ctx),
     "simulate_trade": lambda ctx, a: tool_simulate_trade(ctx, a.get("ticker"), a.get("action"), a.get("shares"), a.get("dollars")),
+    "check_fomo": lambda ctx, a: tool_check_fomo(ctx, a.get("ticker"), a.get("dollars")),
 }
 
 
@@ -497,6 +523,7 @@ def tool_label(name, args):
         "get_trade_review": f"trade #{args.get('trade_id')} review",
         "get_portfolio_breakdown": "portfolio breakdown",
         "simulate_trade": f"what-if: {args.get('action', '')} {ticker}".strip(),
+        "check_fomo": f"FOMO check on {ticker}",
     }.get(name, name)
 
 
@@ -740,6 +767,13 @@ def build_suggestions(db, user):
             found.append((65, t, f"Does my {t} thesis still hold?",
                           f"{t} is down {abs(h['total_gain_loss_percent']):.0f}% from what I paid. Does my original thesis still hold, or am I holding on hope?"))
             break
+
+    # NEW: chasing has measurably cost them - worth a conversation.
+    chasing = fomo.personal_record(db, user)["groups"]["chasing"]
+    if chasing["graded"] >= 2 and chasing["avg_vs_market_pct"] is not None and chasing["avg_vs_market_pct"] < 0:
+        found.append((62, None, "What has chasing cost me?",
+                      f"My FOMO check says my chasing buys have averaged {chasing['avg_vs_market_pct']:+.1f} points vs the S&P 500. "
+                      "Which trades were they, what did they have in common, and what rule should I set for myself?"))
 
     summary = thesis.reasons_summary(db, user)
     lagging = [e for e in summary["by_reason"]

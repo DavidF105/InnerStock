@@ -95,6 +95,18 @@ class Trade(Base):
     # its review date (grading.auto_grade_due) rather than the user choosing
     # the grade. Re-grading by hand sets it back to False.
     auto_graded = Column(Boolean, nullable=False, server_default=false())
+    # NEW: the FOMO check (fomo.py) for buys, worked out once from the price
+    # history around the trade and the user's own habits, then stored so the
+    # dashboard and patterns don't re-download prices. fomo_band is
+    # "chasing" / "warm" / "calm" / "dip" / "unknown" (not enough history);
+    # fomo_signals is JSON (the list of signals that fired). The patience
+    # test - how the price moved in the 5 trading days AFTER the buy - is
+    # filled in once a week has passed.
+    fomo_score = Column(Integer, nullable=True)
+    fomo_band = Column(String, nullable=True)
+    fomo_signals = Column(Text, nullable=True)
+    fomo_checked_at = Column(DateTime, nullable=True)
+    week_later_pct = Column(Float, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
 
     # Where this trade came from: "manual" (logged through POST /trades),

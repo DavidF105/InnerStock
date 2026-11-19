@@ -117,6 +117,11 @@ app.include_router(accounts.router)
 import demo
 app.include_router(demo.router)
 
+# NEW: the FOMO check - "was this buy a chase?" Scores every buy from the
+# price action before it and the user's own habits: /fomo/check, /fomo/summary
+import fomo
+app.include_router(fomo.router)
+
 # AI RATE LIMITING: every endpoint that can trigger a real Claude call
 # (sentiment, bull/bear, advisor chat) costs money per hit, so each user
 # gets a capped number of Claude calls per rolling window. Without this, a
@@ -459,6 +464,13 @@ def create_trade(trade: TradeCreate, db: Session = Depends(get_db), current_user
     db.add(new_trade)      # stage the new trade for saving
     db.commit()             # actually save it to the database
     db.refresh(new_trade)   # reload it, so we get the auto-generated id back
+    # NEW: run the FOMO check now, so the form can show it right away (the
+    # form's live check already warmed the price cache). Never blocks saving.
+    try:
+        fomo.ensure_scored(db, current_user, [new_trade])
+        db.refresh(new_trade)
+    except Exception as e:
+        print(f"[fomo] check after logging failed: {e}")
     return new_trade
 
 # Returns every trade currently saved in the database.
@@ -973,20 +985,6 @@ SUMMARY: [two sentences explaining why, based on the headlines]"""
         "summary": summary
     }
 
-# Checks whether a trade was made shortly after a sharp price move (up or
-# down) - a proxy for an emotionally-driven entry rather than one based on
-# careful research. Returns a dict with the flag and reasoning, or a
-# "not enough data" fallback if history isn't available.
-def check_fomo_for_trade(trade):
-    if trade.action != "buy":
-        return {"fomo_flag": False, "reason": "Only buy trades are checked for FOMO"}
-
-    # The rule itself (>8% move over ~5 trading days before the trade) lives
-    # in grading.fomo_from_closes, shared with the review scorecard.
-    end_date = trade.trade_date
-    start_date = end_date - timedelta(days=grading.FOMO_LOOKBACK_DAYS)
-    return grading.fomo_from_closes(grading.fetch_daily_closes(trade.ticker, start_date, end_date))
-
 # Aggregates reviewed trades to surface behavioral patterns: whether higher
 # conviction actually correlates with better outcomes, and whether FOMO-flagged
 # trades perform worse than non-FOMO ones. This is the ground-truth data layer
@@ -994,6 +992,7 @@ def check_fomo_for_trade(trade):
 # PROTECTED + SCOPED: only the logged-in user's own reviewed trades count.
 @app.get("/trading-patterns")
 def get_trading_patterns(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    fomo.ensure_scored(db, current_user)  # scores any buys not checked yet (stored after)
     trades = db.query(Trade).filter(Trade.user_id == current_user.id).all()
 
     # Only trades that have actually been reviewed (outcome_tag set) count
@@ -1029,20 +1028,22 @@ def get_trading_patterns(db: Session = Depends(get_db), current_user: User = Dep
             "correct_rate": round(correct_rate, 1)
         })
 
-    # --- Correct rate: FOMO-flagged vs non-FOMO trades ---
-    # Only "buy" trades are checked for FOMO (selling into a rally isn't FOMO -
-    # same rule check_fomo_for_trade already applies), so sells are skipped here.
-    # NOTE: this calls check_fomo_for_trade() once per reviewed buy trade, which
-    # means a live yfinance lookup each time - fine for now, but worth caching
-    # the FOMO result on the trade itself once there's real trade volume.
+    # --- Correct rate: FOMO (chasing) buys vs calm ones ---
+    # Uses the FOMO check stored on each buy (fomo.py), so no price
+    # downloads here once trades are scored. Only buys are checked; "dip"
+    # buys (after a sharp drop) are a different habit and left out of both,
+    # as are buys with too little price history to judge. A buy the user
+    # tagged "Fear of missing out" counts as FOMO whatever the score says.
     fomo_stats = {"correct": 0, "incorrect": 0, "mixed": 0, "total": 0}
     non_fomo_stats = {"correct": 0, "incorrect": 0, "mixed": 0, "total": 0}
 
     for t in reviewed:
         if t.action != "buy":
             continue
-        fomo_result = check_fomo_for_trade(t)
-        target = fomo_stats if fomo_result["fomo_flag"] else non_fomo_stats
+        group = fomo.group_of(t)
+        if group not in ("chasing", "warm", "calm"):
+            continue
+        target = fomo_stats if group == "chasing" else non_fomo_stats
         target[t.outcome_tag] += 1
         target["total"] += 1
 
@@ -1224,8 +1225,9 @@ Stated fear/mistake: {profile.biggest_fear or "not provided"}
     patterns_summary = f"""
 Reviewed trades: {patterns_data['reviewed_count']}, pending review: {patterns_data['pending_count']}
 By conviction score: {patterns_data['by_conviction']}
-FOMO-flagged trades correct rate: {patterns_data['fomo_vs_non_fomo']['fomo']['correct_rate']}%
-Non-FOMO trades correct rate: {patterns_data['fomo_vs_non_fomo']['non_fomo']['correct_rate']}%
+FOMO (chasing) buys correct rate: {patterns_data['fomo_vs_non_fomo']['fomo']['correct_rate']}% of {patterns_data['fomo_vs_non_fomo']['fomo']['total']}
+Calm buys correct rate: {patterns_data['fomo_vs_non_fomo']['non_fomo']['correct_rate']}% of {patterns_data['fomo_vs_non_fomo']['non_fomo']['total']}
+{fomo.advisor_context_section(db, current_user)}
 """
 
     # NEW - per-holding fundamentals, so the advisor can reason about

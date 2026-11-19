@@ -91,13 +91,6 @@ def test_trades_are_judged_at_the_review_date_not_today(client, alice, history):
     assert card["suggestion"]["outcome"] == "correct"
 
 
-def test_scorecard_flags_fomo_entries(client, alice, history):
-    trade = log_trade(client, alice, "AAPL", "buy", 10, 120, trade_date=TRADED, review_date=REVIEWED)
-    history["AAPL"] = [(TRADED - timedelta(days=d), p) for d, p in ((6, 100), (5, 102), (4, 108), (2, 112), (1, 118))] \
-        + closes((0, 120), (20, 120))
-    assert scorecard(client, alice, trade["id"])["fomo"]["fomo_flag"] is True
-
-
 def test_stock_splits_dont_fake_a_loss(client, alice, history):
     # Bought at $500, then a 5:1 split: yfinance now shows the trade-day
     # close as $100. A rise to $110 is +10%, not -78%.

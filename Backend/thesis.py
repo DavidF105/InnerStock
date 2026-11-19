@@ -110,6 +110,8 @@ def count_needing_thesis(db: Session = Depends(get_db), current_user: User = Dep
     return {"count": db.query(Trade).filter(*needs_reason_filter(current_user)).count()}
 
 
+INBOX_FOMO_CHECKS = 10
+
 # Every trade still waiting for a reason, newest first (recent trades are
 # the ones the user can still remember accurately).
 @router.get("/needs-thesis")
@@ -121,6 +123,11 @@ def list_needing_thesis(db: Session = Depends(get_db), current_user: User = Depe
         .order_by(Trade.trade_date.desc(), Trade.trade_time.desc(), Trade.id.desc())
         .all()
     )
+    # NEW: run the FOMO check on the newest buys here, so a buy that looks
+    # like a chase can ask "was this FOMO?" while the user is answering.
+    # Honest answers are what the detector is measured against (fomo.py).
+    import fomo
+    fomo.ensure_scored(db, current_user, [t for t, _ in rows if t.action == "buy"][:INBOX_FOMO_CHECKS])
     return {
         "count": len(rows),
         "trades": [
@@ -134,6 +141,7 @@ def list_needing_thesis(db: Session = Depends(get_db), current_user: User = Depe
                 "trade_time": t.trade_time.isoformat() if t.trade_time else None,
                 "source": t.source,
                 "account": account_name,
+                "fomo": fomo.stored_result(t),
             }
             for t, account_name in rows
         ],

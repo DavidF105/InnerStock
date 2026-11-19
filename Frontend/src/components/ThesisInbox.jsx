@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react"
 import { apiFetch } from "../api"
 import ReasonChips from "./ReasonChips"
+import { FomoBadge } from "./FomoCheck"
 import { DONT_REMEMBER, REVIEW_OPTIONS, dateMonthsAfter } from "../reasons"
 
 // How many unanswered trades to render at once - a first brokerage sync can
@@ -235,6 +236,9 @@ function ThesisInbox({ onAnswered, embedded = false }) {
                     <span className="review-ticker">
                       <span className={`pill ${trade.action === "buy" ? "pill-success" : "pill-danger"}`}>{trade.action}</span>
                       <strong>{trade.ticker}</strong>
+                      {trade.fomo && ["chasing", "warm"].includes(trade.fomo.band) && (
+                        <FomoBadge band={trade.fomo.band} score={trade.fomo.score} />
+                      )}
                       <span className="brokerage-meta">
                         {trade.quantity.toLocaleString(undefined, { maximumFractionDigits: 4 })} @ ${trade.price_per_share.toFixed(2)}
                       </span>
@@ -255,6 +259,18 @@ function ThesisInbox({ onAnswered, embedded = false }) {
                         <label>Reasons (pick all that apply)</label>
                         <ReasonChips options={options} selected={draft.tags} onChange={(tags) => update({ tags })} />
                       </div>
+
+                      {/* NEW: this buy looked like a chase (fomo.py). Asking now, while the
+                          user answers, is what makes the FOMO record honest. */}
+                      {trade.fomo && ["chasing", "warm"].includes(trade.fomo.band) && !draft.tags.includes("fomo") && (
+                        <div className="fomo-nudge">
+                          <span><strong>This looked like a chase:</strong> {trade.fomo.summary.replace(/^(Chasing|A bit warm): /, "")} Was it FOMO?</span>
+                          <button type="button" className="btn"
+                            onClick={() => update({ tags: [...draft.tags.filter((t) => t !== DONT_REMEMBER), "fomo"] })}>
+                            Yes, it was
+                          </button>
+                        </div>
+                      )}
 
                       {!(draft.tags.length === 1 && draft.tags[0] === DONT_REMEMBER) && (
                         <>

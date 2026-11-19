@@ -25,6 +25,7 @@ import yfinance as yf
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+import fomo
 import thesis
 from deps import get_current_user, get_db
 from models import Trade, User
@@ -52,8 +53,9 @@ FLAT_PCT = 2.0
 # movement afterwards can't make them right or wrong.
 NOT_A_MARKET_CALL = {"need_cash", "rebalance"}
 
-FOMO_LOOKBACK_DAYS = 10
-FOMO_THRESHOLD_PCT = 8.0
+# The scorecard's price history starts this many days before the trade, so
+# the trade-day close is always in it (weekends, holidays).
+LOOKBACK_DAYS = 10
 
 MAX_SERIES_POINTS = 90
 
@@ -79,10 +81,11 @@ _closes_cache = {}
 _closes_lock = threading.Lock()
 
 
-def fetch_daily_closes(ticker: str, start: date, end: date) -> list:
-    """[(date, close), ...] oldest first, for start <= date <= end. [] on failure.
+def _fetch_bars(ticker: str, start: date, end: date) -> list:
+    """[(date, close, volume), ...] oldest first, for start <= date <= end. [] on failure.
 
-    The one place this module talks to yfinance - tests replace it.
+    The one place this module talks to yfinance. One download serves both
+    closes (grading) and volume (the FOMO check in fomo.py).
     """
     key = (ticker.upper(), start, end)
     with _closes_lock:
@@ -95,13 +98,35 @@ def fetch_daily_closes(ticker: str, start: date, end: date) -> list:
     except Exception as e:
         print(f"yfinance history fetch failed for {ticker}: {e}")
         return []
-    closes = [(ts.date(), float(close)) for ts, close in history["Close"].items() if close == close] if not history.empty else []
+    bars = []
+    if not history.empty:
+        volumes = history["Volume"] if "Volume" in history else None
+        for ts, close in history["Close"].items():
+            if close == close:  # NaN check
+                volume = volumes.get(ts) if volumes is not None else None
+                bars.append((ts.date(), float(close), float(volume) if volume == volume and volume is not None else None))
 
     with _closes_lock:
         if len(_closes_cache) > 500:
             _closes_cache.clear()
-        _closes_cache[key] = (monotonic(), closes)
-    return closes
+        _closes_cache[key] = (monotonic(), bars)
+    return bars
+
+
+def fetch_daily_closes(ticker: str, start: date, end: date) -> list:
+    """[(date, close), ...] oldest first, for start <= date <= end. [] on failure.
+
+    Tests replace this (the `history` fixture).
+    """
+    return [(d, c) for d, c, _ in _fetch_bars(ticker, start, end)]
+
+
+def fetch_daily_volumes(ticker: str, start: date, end: date) -> dict:
+    """{date: shares traded} for start <= date <= end. {} on failure.
+
+    Tests replace this (the `volumes` fixture).
+    """
+    return {d: v for d, _, v in _fetch_bars(ticker, start, end) if v}
 
 
 def close_on_or_before(closes: list, day: date):
@@ -116,25 +141,6 @@ def close_on_or_before(closes: list, day: date):
 
 def pct_change(start: float, end: float) -> float:
     return round((end - start) / start * 100, 2)
-
-
-# --- FOMO --------------------------------------------------------------------------
-
-def fomo_from_closes(closes_up_to_trade: list) -> dict:
-    """Was the trade made right after a sharp move? Same rule main.check_fomo_for_trade
-    has always used: >8% change over roughly the 5 trading days before the trade."""
-    if len(closes_up_to_trade) < 2:
-        return {"fomo_flag": False, "reason": "Not enough price history available to check"}
-
-    price_at_trade = closes_up_to_trade[-1][1]
-    price_before = closes_up_to_trade[max(0, len(closes_up_to_trade) - 6)][1]
-    change = (price_at_trade - price_before) / price_before * 100
-
-    if abs(change) > FOMO_THRESHOLD_PCT and change > 0:
-        return {"fomo_flag": True, "reason": f"Stock rose {round(change, 2)}% in the days before this trade - possible FOMO entry"}
-    if abs(change) > FOMO_THRESHOLD_PCT:
-        return {"fomo_flag": True, "reason": f"Stock dropped {round(change, 2)}% in the days before this trade - possible 'buying the dip'"}
-    return {"fomo_flag": False, "reason": "No significant price move detected before this trade"}
 
 
 # --- Suggested grade ------------------------------------------------------------------
@@ -207,11 +213,11 @@ def scorecard(trade: Trade, today: date = None) -> dict:
         "available": False,
     }
 
-    closes = fetch_daily_closes(trade.ticker, trade.trade_date - timedelta(days=FOMO_LOOKBACK_DAYS), today)
-    before = [c for c in closes if c[0] <= trade.trade_date]
+    closes = fetch_daily_closes(trade.ticker, trade.trade_date - timedelta(days=LOOKBACK_DAYS), today)
     after = [c for c in closes if c[0] >= trade.trade_date]
-    card["fomo"] = fomo_from_closes(before) if trade.action == "buy" \
-        else {"fomo_flag": False, "reason": "Only buy trades are checked for FOMO"}
+    # The FOMO check (fomo.py) is stored on the trade; the scorecard route
+    # runs it first if it hasn't been.
+    card["fomo"] = fomo.stored_result(trade)
 
     if not after or entry <= 0:
         card["message"] = f"No price history for {trade.ticker} since this trade, so it can only be graded from memory."
@@ -226,7 +232,7 @@ def scorecard(trade: Trade, today: date = None) -> dict:
         entry = trade_day_close[1]
         card["split_adjusted"] = True
 
-    bench_closes = fetch_daily_closes(benchmark[0], trade.trade_date - timedelta(days=FOMO_LOOKBACK_DAYS), today) if benchmark else []
+    bench_closes = fetch_daily_closes(benchmark[0], trade.trade_date - timedelta(days=LOOKBACK_DAYS), today) if benchmark else []
     bench_start = close_on_or_before(bench_closes, trade.trade_date) if bench_closes else None
 
     def bench_return(day):
@@ -287,7 +293,9 @@ def _own_trade(db: Session, user: User, trade_id: int) -> Trade:
 # instantly and each card fills in its numbers as its prices arrive.
 @router.get("/thesis-reviews/{trade_id}/scorecard")
 def get_scorecard(trade_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    return scorecard(_own_trade(db, current_user, trade_id))
+    trade = _own_trade(db, current_user, trade_id)
+    fomo.ensure_scored(db, current_user, [trade])
+    return scorecard(trade)
 
 
 def apply_grade(db: Session, user: User, trade_id: int, outcome: str, notes) -> Trade:

@@ -197,9 +197,14 @@ function ReviewCard({ review, onGraded, regrade = false }) {
       {/* What actually happened. */}
       {card ? <Scorecard card={card} action={review.action} /> : <div className="score-empty">Loading prices…</div>}
 
-      {card?.fomo?.fomo_flag && (
-        <div className="fomo-line">
-          <IconBolt size={13} /> {card.fomo.reason}
+      {/* NEW: the stored FOMO check (fomo.py) - only worth a line when the
+          buy wasn't a calm one. */}
+      {card?.fomo && ["chasing", "warm", "dip"].includes(card.fomo.band) && (
+        <div className={`fomo-line fomo-${card.fomo.band}`}>
+          <IconBolt size={13} /> {card.fomo.summary}
+          {card.fomo.week_later_pct != null && (
+            <span className="fomo-week"> A week later it was {card.fomo.week_later_pct < 0 ? "cheaper" : "higher"} ({card.fomo.week_later_pct > 0 ? "+" : ""}{card.fomo.week_later_pct.toFixed(1)}%).</span>
+          )}
         </div>
       )}
 

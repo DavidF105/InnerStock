@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from "react"
 import StatsCards from "./StatsCards"
 import HoldingsTable from "./HoldingsTable"
 import BrokerageCard from "./BrokerageCard"
+import FomoCard from "./FomoCard"
 import { apiFetch } from "../api"
 
 // How often the dashboard re-polls /holdings for updated prices while the
@@ -146,6 +147,8 @@ function Dashboard({ refreshKey, onNavigate, inboxCount = 0, onBrokerageSynced }
           gradedCount={gradedCount}
         />
         <HoldingsTable holdings={data.holdings} />
+        {/* NEW: how chasing vs calm buys have done for you (fomo.py) */}
+        <FomoCard refreshKey={`${refreshKey}-${syncKey}`} />
       </>
     )
   }

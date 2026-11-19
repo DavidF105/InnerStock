@@ -1,6 +1,11 @@
 import { useEffect, useState } from "react"
 import { apiFetch } from "../api"
 import ReasonChips from "./ReasonChips"
+import FomoCheck from "./FomoCheck"
+
+// NEW: how long the form waits after the last keystroke before re-running
+// the live FOMO check, so typing a ticker doesn't fire one per letter.
+const FOMO_CHECK_DELAY_MS = 700
 
 // All the state, validation, and submit logic below is UNCHANGED from the
 // current version — same fields, same validate() rules, same handleSubmit
@@ -45,6 +50,36 @@ function TradeForm({ onTradeLogged }) {
   // intraday match once trade_time is filled in too. A manually-typed
   // price is never touched either way.
   const [priceAutofilled, setPriceAutofilled] = useState(false)
+
+  // NEW - the live FOMO check (POST /fomo/check, Backend/fomo.py) for the
+  // buy being logged: was the stock running hot, and were you rushed? It
+  // never blocks saving - it's there so the reason you pick is honest.
+  const [fomoCheck, setFomoCheck] = useState(null)
+  useEffect(() => {
+    const ready = form.action === "buy" && form.ticker.trim() && form.trade_date && Number(form.price_per_share) > 0
+    const timer = setTimeout(() => {
+      if (!ready) {
+        setFomoCheck(null)
+        return
+      }
+      apiFetch("/fomo/check", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ticker: form.ticker.trim(),
+          trade_date: form.trade_date,
+          trade_time: form.trade_time || null,
+          price: Number(form.price_per_share),
+          quantity: Number(form.quantity) > 0 ? Number(form.quantity) : null,
+        }),
+      })
+        .then((response) => (response.ok ? response.json() : null))
+        .then(setFomoCheck)
+        .catch(() => setFomoCheck(null))
+    }, ready ? FOMO_CHECK_DELAY_MS : 0)
+    return () => clearTimeout(timer)
+  }, [form.action, form.ticker, form.trade_date, form.trade_time, form.price_per_share, form.quantity])
+  const looksLikeAChase = fomoCheck && (fomoCheck.band === "chasing" || fomoCheck.band === "warm")
 
   function handleChange(e) {
     const { name, value } = e.target
@@ -306,6 +341,18 @@ function TradeForm({ onTradeLogged }) {
           </div>
         </div>
       </div>
+
+      <FomoCheck result={fomoCheck}>
+        {looksLikeAChase && reasonOptions && !form.reason_tags.includes("fomo") && (
+          <div className="fomo-nudge">
+            <span>Be honest with future you: was some of this fear of missing out?</span>
+            <button type="button" className="btn"
+              onClick={() => setForm((prev) => ({ ...prev, reason_tags: [...prev.reason_tags, "fomo"] }))}>
+              Yes, add "Fear of missing out"
+            </button>
+          </div>
+        )}
+      </FomoCheck>
 
       <div style={{ display: "flex", justifyContent: "flex-end", gap: "8px", marginTop: "var(--space-lg)" }}>
         <button type="submit" className="btn btn-primary">

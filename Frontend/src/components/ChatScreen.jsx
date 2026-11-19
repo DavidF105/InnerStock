@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react"
 import { apiFetch } from "../api"
 import ReactMarkdown from "react-markdown"
-import { IconSend, IconMessageCircle, IconChartBar, IconClock } from "@tabler/icons-react"
+import { IconSend, IconMessageCircle, IconChartBar, IconClock, IconSearch, IconSparkles } from "@tabler/icons-react"
 
 // Small icon-shaped SVG for the "risk/goals" chip — no matching tabler
 // icon felt right for "profile," so this is a plain inline SVG instead
@@ -36,7 +36,24 @@ function ChatScreen() {
   const [holdings, setHoldings] = useState(null)
   const [patterns, setPatterns] = useState(null)
 
+  // NEW: suggested questions built from the user's situation right now
+  // (GET /chat/suggestions - earnings coming up or just reported, trades
+  // due for review, big movers, oversized positions...). Refreshed after
+  // every reply, since answering one can change what's worth asking next.
+  const [suggestions, setSuggestions] = useState([])
+
   const bottomRef = useRef(null)
+
+  function fetchSuggestions() {
+    apiFetch("/chat/suggestions")
+      .then((response) => (response.ok ? response.json() : { suggestions: [] }))
+      .then((data) => setSuggestions(data.suggestions || []))
+      .catch(() => {})
+  }
+
+  useEffect(() => {
+    fetchSuggestions()
+  }, [])
 
   useEffect(() => {
     apiFetch("/chat/history")
@@ -73,9 +90,14 @@ function ChatScreen() {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" })
   }, [messages, sending])
 
-  async function handleSend(e) {
+  function handleSubmit(e) {
     e.preventDefault()
-    const trimmed = input.trim()
+    send(input)
+  }
+
+  // Used by both the input box and the suggestion chips.
+  async function send(text) {
+    const trimmed = text.trim()
     if (!trimmed || sending) return
 
     setMessages((prev) => [...prev, { role: "user", content: trimmed }])
@@ -90,10 +112,24 @@ function ChatScreen() {
         body: JSON.stringify({ message: trimmed }),
       })
 
+      // 429 = the backend's per-user AI rate limit. The backend rejects
+      // the message before saving it, so take the optimistic bubble back
+      // out and restore the text - otherwise the screen would show a
+      // message that isn't actually in the saved history.
+      if (response.status === 429) {
+        const body = await response.json().catch(() => null)
+        setMessages((prev) => prev.slice(0, -1))
+        setInput(trimmed)
+        throw new Error(body?.detail || "Too many messages - try again later")
+      }
+
       if (!response.ok) throw new Error("Couldn't reach the advisor")
 
       const data = await response.json()
-      setMessages((prev) => [...prev, { role: "assistant", content: data.reply }])
+      // tools_used: what the advisor looked up for this answer (NEW) - shown
+      // under the reply so it's clear the numbers came from somewhere.
+      setMessages((prev) => [...prev, { role: "assistant", content: data.reply, toolsUsed: data.tools_used || [] }])
+      fetchSuggestions()
     } catch (err) {
       setError(err.message)
     } finally {
@@ -145,7 +181,22 @@ function ChatScreen() {
               {!loading && messages.length === 0 && (
                 <div className="chat-empty">
                   <IconMessageCircle size={28} />
-                  <p>Ask about your holdings, your trading patterns, or a specific past trade.</p>
+                  <p>
+                    Ask about your holdings, any stock, a past trade, or what a trade would do to your portfolio.
+                    The advisor looks up prices, news and earnings, and knows why you made every trade.
+                  </p>
+                  {/* NEW: on an empty conversation, suggestions are the
+                      main way in - shown as larger cards */}
+                  {suggestions.length > 0 && (
+                    <div className="chat-suggestion-cards">
+                      {suggestions.map((s) => (
+                        <button key={s.label} className="chat-suggestion-card" onClick={() => send(s.prompt)} disabled={sending}>
+                          <IconSparkles size={14} />
+                          <span>{s.label}</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -163,14 +214,31 @@ function ChatScreen() {
                   // styled to fit inside a chat bubble via the .msg.assistant
                   // rules in theme.css.
                   <div key={i} className="msg assistant">
-                    <ReactMarkdown>{m.content}</ReactMarkdown>
+                    <ReactMarkdown
+                      components={{
+                        // News links from the advisor open in a new tab
+                        a: ({ href, children }) => <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>,
+                      }}
+                    >
+                      {m.content}
+                    </ReactMarkdown>
+                    {m.toolsUsed?.length > 0 && (
+                      <div className="msg-tools">
+                        <IconSearch size={11} /> Looked up: {m.toolsUsed.join(" · ")}
+                      </div>
+                    )}
                   </div>
                 )
               )}
 
               {sending && (
-                <div className="typing">
-                  <span /><span /><span />
+                <div className="typing-row">
+                  <div className="typing">
+                    <span /><span /><span />
+                  </div>
+                  {/* Answers can take a while now - the advisor may look up
+                      several things before replying */}
+                  <span className="typing-label">Checking your data and the market…</span>
                 </div>
               )}
 
@@ -179,12 +247,25 @@ function ChatScreen() {
               <div ref={bottomRef} />
             </div>
 
-            <form onSubmit={handleSend} className="chat-input-bar">
+            {/* NEW: once a conversation is going, suggestions sit as chips
+                just above the input */}
+            {messages.length > 0 && suggestions.length > 0 && (
+              <div className="chat-suggestion-chips">
+                {suggestions.map((s) => (
+                  <button key={s.label} className="chat-suggestion-chip" onClick={() => send(s.prompt)} disabled={sending}>
+                    {s.label}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            <form onSubmit={handleSubmit} className="chat-input-bar">
               <input
                 type="text"
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
-                placeholder="Ask about your portfolio, a ticker, or your trading patterns…"
+                maxLength={4000}
+                placeholder="Ask about your portfolio, any stock, or a what-if trade…"
               />
               <button type="submit" disabled={sending} className="btn btn-accent">
                 <IconSend size={16} />
@@ -193,7 +274,7 @@ function ChatScreen() {
           </div>
 
           <div className="chat-disclaimer">
-            InnerStock Advisor references your logged data, not real-time market execution. Not financial advice.
+            The advisor reads your InnerStock journal and Yahoo Finance data. It can't place trades. Not financial advice.
           </div>
         </div>
       </div>

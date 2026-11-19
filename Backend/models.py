@@ -1,5 +1,7 @@
-from sqlalchemy import Column, Integer, String, Numeric, Date, DateTime, ForeignKey, Text, Time, UniqueConstraint
-from sqlalchemy.sql import func
+import json
+
+from sqlalchemy import Boolean, Column, Integer, String, Numeric, Date, DateTime, Float, ForeignKey, Text, Time, UniqueConstraint
+from sqlalchemy.sql import false, func
 from database import Base
 
 
@@ -11,6 +13,14 @@ class User(Base):
     email = Column(String, unique=True, nullable=False, index=True)
     hashed_password = Column(String, nullable=False)
     created_at = Column(DateTime, server_default=func.now())
+    # NEW: set once the user clicks the link in the confirmation email (or
+    # a password-reset link, which proves the same thing). Recaps are only
+    # emailed to confirmed addresses, so nobody can sign up with someone
+    # else's email and fill their inbox.
+    email_verified = Column(Boolean, nullable=False, server_default=false())
+    # NEW: a throwaway "Try the demo" account (demo.py) - sample data,
+    # deleted after 24 hours, no email or brokerage features.
+    is_demo = Column(Boolean, nullable=False, server_default=false())
 
 class UserProfile(Base):
     __tablename__ = "user_profiles"
@@ -60,7 +70,58 @@ class Trade(Base):
     review_date = Column(Date, nullable=True)
     outcome_tag = Column(String, nullable=True)       # stays empty until resurfaced & graded
     review_notes = Column(Text, nullable=True)         # NEW — optional freeform reflection, added at grading time
+    # Why the trade was made, as fixed categories (comma-separated slugs, same
+    # storage pattern as UserProfile.sectors_of_interest) - see
+    # thesis.BUY_REASONS / SELL_REASONS. Categories are what make "you buy on
+    # tips and they lose" style patterns countable; the free-text thesis
+    # alone can't be aggregated. "dont_remember" is a valid, honest answer.
+    reason_tags = Column(String, nullable=True)
+    # When the thesis/reasons were actually written. Equal to the trade time
+    # for trades logged by hand; can be weeks later for synced trades, and a
+    # reason written long after the fact deserves less trust - the advisor
+    # is told which theses were written in hindsight.
+    thesis_written_at = Column(DateTime, nullable=True)
+    # Grading snapshot (see grading.py): when the trade was graded, what the
+    # numbers suggested, and the returns the grade was made against - the
+    # trade's own return and the S&P 500's over the same days, in %, measured
+    # at the review date. Lets "which reasons actually make money" be
+    # answered later without re-downloading prices, and records when a
+    # grade went against the numbers.
+    graded_at = Column(DateTime, nullable=True)
+    suggested_outcome = Column(String, nullable=True)
+    graded_return_pct = Column(Float, nullable=True)
+    graded_benchmark_return_pct = Column(Float, nullable=True)
+    # NEW: True when InnerStock graded the trade itself from the numbers on
+    # its review date (grading.auto_grade_due) rather than the user choosing
+    # the grade. Re-grading by hand sets it back to False.
+    auto_graded = Column(Boolean, nullable=False, server_default=false())
+    # NEW: the FOMO check (fomo.py) for buys, worked out once from the price
+    # history around the trade and the user's own habits, then stored so the
+    # dashboard and patterns don't re-download prices. fomo_band is
+    # "chasing" / "warm" / "calm" / "dip" / "unknown" (not enough history);
+    # fomo_signals is JSON (the list of signals that fired). The patience
+    # test - how the price moved in the 5 trading days AFTER the buy - is
+    # filled in once a week has passed.
+    fomo_score = Column(Integer, nullable=True)
+    fomo_band = Column(String, nullable=True)
+    fomo_signals = Column(Text, nullable=True)
+    fomo_checked_at = Column(DateTime, nullable=True)
+    week_later_pct = Column(Float, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
+
+    # Where this trade came from: "manual" (logged through POST /trades),
+    # "csv" (the old Wealthsimple CSV import, since removed) or "snaptrade"
+    # (synced from a linked brokerage account - see snaptrade_sync.py).
+    source = Column(String, nullable=False, server_default="manual")
+    # The brokerage's own id for this trade (SnapTrade activity id). Unique
+    # per user, which is what makes re-running a sync safe: a trade that's
+    # already been imported is recognised and skipped, never duplicated.
+    # Null for manual/csv trades.
+    external_id = Column(String, nullable=True)
+    # Which linked account (TFSA, personal, ...) a synced trade happened in.
+    brokerage_account_id = Column(Integer, ForeignKey("brokerage_accounts.id"), nullable=True)
+
+    __table_args__ = (UniqueConstraint("user_id", "external_id", name="uq_trades_user_external_id"),)
 
 
 class PriceCache(Base):
@@ -112,3 +173,117 @@ class Watchlist(Base):
     added_at = Column(DateTime, server_default=func.now())
 
     __table_args__ = (UniqueConstraint("user_id", "ticker", name="uq_watchlist_user_ticker"),)
+
+
+class BrokerageAccount(Base):
+    __tablename__ = "brokerage_accounts"
+
+    # One row per brokerage account linked through SnapTrade (e.g. a
+    # Wealthsimple TFSA). Created/updated by snaptrade_sync.sync_accounts.
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    external_account_id = Column(String, nullable=False)   # SnapTrade's account id
+    institution = Column(String, nullable=True)            # e.g. "Wealthsimple Trade"
+    name = Column(String, nullable=True)                   # e.g. "Wealthsimple Trade TFSA"
+    account_type = Column(String, nullable=True)           # e.g. "tfsa", "non_registered", "non_registered_crypto"
+    # Only accounts with this on have their trades pulled in. Defaults are
+    # set per account type when the account is first seen (see
+    # snaptrade_sync.SYNCED_ACCOUNT_TYPES).
+    sync_enabled = Column(Boolean, nullable=False, server_default=false())
+    last_synced_at = Column(DateTime, nullable=True)
+    # Set when SnapTrade stops reporting this account (the user disconnected
+    # or reconnected their brokerage, which gives accounts new ids). Trades
+    # synced from it can then be taken over by the same account's new id
+    # instead of being imported twice - see snaptrade_sync._find_match.
+    disconnected_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
+
+    __table_args__ = (UniqueConstraint("user_id", "external_account_id", name="uq_brokerage_accounts_user_account"),)
+
+
+class SnapTradeUser(Base):
+    __tablename__ = "snaptrade_users"
+
+    # With commercial (developer) SnapTrade keys, every InnerStock user gets
+    # their own SnapTrade user, created the first time they press "Connect".
+    # Not used with a personal key (that key IS one person's SnapTrade user).
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), unique=True, nullable=False)
+    # The id we registered with SnapTrade - random, never the email (SnapTrade
+    # requires it to be immutable, and emails can change).
+    snaptrade_user_id = Column(String, unique=True, nullable=False)
+    # SnapTrade's per-user secret, encrypted with FIELD_ENCRYPTION_KEY
+    # (secret_box.py) - never stored in plain text.
+    user_secret_encrypted = Column(Text, nullable=False)
+    created_at = Column(DateTime, server_default=func.now())
+
+
+class EarningsRecap(Base):
+    __tablename__ = "earnings_recaps"
+
+    # NEW: Claude's write-up of one company's earnings report - what
+    # happened and what it means for the company (earnings_recaps.py).
+    # Shared by every user who held the stock, so each report is written
+    # (and paid for) once, not once per user.
+    id = Column(Integer, primary_key=True)
+    # The ticker the facts came from - the US listing for a CDR (GOOG for
+    # GOOG.TO), so Canadian and US holders share one recap.
+    ticker = Column(String, nullable=False)
+    company_name = Column(String, nullable=True)
+    report_date = Column(Date, nullable=False)              # US/Eastern
+    # Numbers from Yahoo's earnings calendar; None when Yahoo didn't have them.
+    eps_estimate = Column(Float, nullable=True)
+    eps_actual = Column(Float, nullable=True)
+    surprise_pct = Column(Float, nullable=True)
+    # Stock move from the last close before the report to the first close
+    # after it, and on to the latest close when the recap was written.
+    reaction_pct = Column(Float, nullable=True)
+    move_since_pct = Column(Float, nullable=True)
+    headline = Column(String, nullable=False)
+    what_happened = Column(Text, nullable=False)
+    what_it_means = Column(Text, nullable=False)
+    sentiment = Column(String, nullable=False)              # positive / neutral / negative
+    sources = Column(Text, nullable=True)                   # JSON list of {title, url, publisher}
+    created_at = Column(DateTime, server_default=func.now())
+
+    __table_args__ = (UniqueConstraint("ticker", "report_date", name="uq_earnings_recaps_ticker_date"),)
+
+    @property
+    def sources_list(self):
+        """`sources` decoded: [{title, url, publisher}, ...]."""
+        return json.loads(self.sources) if self.sources else []
+
+
+class EarningsNotification(Base):
+    __tablename__ = "earnings_notifications"
+
+    # NEW: "a stock you hold reported - here's the recap", one row per user
+    # per recap. read_at stays NULL until the user opens the notifications
+    # page (that's what the sidebar bell's unread count is).
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    recap_id = Column(Integer, ForeignKey("earnings_recaps.id"), nullable=False)
+    # What the user actually holds (GOOG.TO), which can differ from the
+    # recap's ticker (GOOG).
+    display_ticker = Column(String, nullable=False)
+    created_at = Column(DateTime, server_default=func.now())
+    read_at = Column(DateTime, nullable=True)
+    # NEW: last time the user sent this recap to their email ("Email me this").
+    emailed_at = Column(DateTime, nullable=True)
+
+    __table_args__ = (UniqueConstraint("user_id", "recap_id", name="uq_earnings_notifications_user_recap"),)
+
+
+class EmailToken(Base):
+    __tablename__ = "email_tokens"
+
+    # NEW: one-time links sent by email (accounts.py) - "confirm your email"
+    # and "reset your password". Only a SHA-256 hash of the token is stored,
+    # so someone reading the database can't use the links.
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    purpose = Column(String, nullable=False)                 # "verify" or "reset"
+    token_hash = Column(String, nullable=False, unique=True)
+    expires_at = Column(DateTime, nullable=False)
+    used_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, server_default=func.now())

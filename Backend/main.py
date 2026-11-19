@@ -16,7 +16,7 @@ from models import Trade
 # so FastAPI can validate it automatically before our code even runs
 from pydantic import BaseModel
 from datetime import date
-from models import Trade, PriceCache, User, UserProfile, ChatMessage, SentimentCache, Watchlist
+from models import Trade, PriceCache, User, UserProfile, ChatMessage, SentimentCache, Watchlist, EarningsNotification, EarningsRecap
 from datetime import date, datetime, timedelta, time
 
 #FOR THE CLAUDE API
@@ -24,11 +24,6 @@ from dotenv import load_dotenv
 import os
 import anthropic
 
-#FILE UPLOADING
-from fastapi import UploadFile, File
-import csv
-import io
-import re
 
 # AUTH: registers a proper "bearer token" security scheme with FastAPI, so
 # Swagger UI's Authorize button recognizes it and can attach the token
@@ -50,48 +45,128 @@ CLAUDE_SONNET_4_6_OUTPUT_COST_PER_MTOK = 15.00
 from auth import hash_password, verify_password, create_access_token, decode_access_token
 from typing import List, Optional
 
+# For the AI rate limiter below. monotonic() is imported by name because
+# `time` is already taken by datetime's time class above.
+import threading
+from collections import defaultdict, deque
+from time import monotonic
+
 # Create the actual app instance. Everything below attaches to this "app" object.
 app = FastAPI()
-
-bearer_scheme = HTTPBearer()
 
 # CORS setup: by default, browsers block a webpage on one address (localhost:5173)
 # from fetching data from a different address (localhost:8000) unless the second
 # one explicitly allows it. This block gives that permission.
+# Deployed frontends (e.g. the Vercel URL) are added through the
+# ALLOWED_ORIGINS env var as a comma-separated list - local dev works
+# without setting anything.
+ALLOWED_ORIGINS = ["http://localhost:5173", "http://localhost:5174"] + [
+    origin.strip().rstrip("/") for origin in os.getenv("ALLOWED_ORIGINS", "").split(",") if origin.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:5174"],  # only allow requests from our React app's address
+    allow_origins=ALLOWED_ORIGINS,  # only allow requests from our React app's address(es)
     allow_methods=["*"],                       # allow all request types (GET, POST, etc.)
     allow_headers=["*"],                       # allow all header types
 )
 
-# This function creates a fresh database connection for each request,
-# and closes it automatically when the request finishes - prevents
-# connections from piling up unused.
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+# get_db / get_current_user live in deps.py so other route modules (e.g.
+# brokerage.py) can share them without importing main.
+from deps import bearer_scheme, get_db, get_current_user
 
-# AUTH: Dependency for protected endpoints - decodes the token via FastAPI's
-# HTTPBearer security scheme, looks up the matching user, and returns it.
-# Raises 401 if the token is missing, invalid, or the user no longer exists.
-# Defined here, right after get_db(), because Python needs this function to
-# already exist before any endpoint below uses it as Depends(get_current_user).
-def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme), db: Session = Depends(get_db)):
-    token = credentials.credentials  # HTTPBearer already strips the "Bearer " prefix for us
+# Linked-brokerage (SnapTrade / Wealthsimple) routes: /brokerage/*
+from brokerage import router as brokerage_router
+app.include_router(brokerage_router)
 
-    user_id = decode_access_token(token)
-    if user_id is None:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
+# "Why did you make this trade?" inbox + reasons summary: /trades/needs-thesis,
+# /trades/thesis, /trades/reasons, /trades/reasons-summary
+import thesis
+app.include_router(thesis.router)
 
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=401, detail="User not found")
+# Grading evidence for due reviews: /thesis-reviews/{id}/scorecard (price
+# move, S&P 500 comparison, suggested grade) and the grade-saving rules.
+import grading
+app.include_router(grading.router)
 
-    return user
+# NEW: upcoming earnings dates + the most important company-specific news
+# for each stock the user holds (sidebar, under the watchlist): /holdings/news
+import holdings_news
+app.include_router(holdings_news.router)
+
+# NEW: earnings recaps + in-app notifications (sidebar bell): /notifications.
+# When a stock you hold reports, Claude writes a recap of what happened and
+# what it means for the company - once per company per report, shared by
+# every holder.
+import earnings_recaps
+app.include_router(earnings_recaps.router)
+
+# NEW: the advisor chat - Claude with read-only tools (prices, performance,
+# news, earnings, the user's own trades, what-if trades) and suggested
+# questions built from the user's current situation: /chat, /chat/suggestions
+import advisor
+app.include_router(advisor.router)
+
+# NEW: account emails (confirm your email, forgot/reset password) and the
+# login guessing limit: /auth/send-verification, /auth/verify-email,
+# /auth/forgot-password, /auth/reset-password
+import accounts
+app.include_router(accounts.router)
+
+# NEW: "Try the demo" - a private throwaway account with sample data: /auth/demo
+import demo
+app.include_router(demo.router)
+
+# NEW: the FOMO check - "was this buy a chase?" Scores every buy from the
+# price action before it and the user's own habits: /fomo/check, /fomo/summary
+import fomo
+app.include_router(fomo.router)
+
+# AI RATE LIMITING: every endpoint that can trigger a real Claude call
+# (sentiment, bull/bear, advisor chat) costs money per hit, so each user
+# gets a capped number of Claude calls per rolling window. Without this, a
+# logged-in user (or a script using their token) could loop over tickers
+# or spam the chat and run up the API bill with no ceiling.
+#
+# Buckets are separate so heavy dashboard use (one sentiment lookup per
+# holding) can't lock someone out of the advisor chat, and vice versa.
+# Values are (max_calls, window_seconds) - tune here if real usage needs it.
+#
+# Kept in memory on purpose: no new dependency or DB table needed. The
+# trade-off is that counts reset when the server restarts and aren't shared
+# across multiple worker processes - fine for a single uvicorn process, but
+# this would need to move to Redis or the DB once there are several workers.
+AI_RATE_LIMITS = {
+    "analysis": (60, 3600),  # /sentiment + /bullbear, Claude calls only (cache hits are free)
+    "chat": (40, 3600),      # /chat messages
+    "demo_chat": (10, 3600), # NEW: /chat for "Try the demo" accounts - anyone can start one
+}
+_ai_call_log = defaultdict(deque)  # (user_id, bucket) -> timestamps of recent calls
+_ai_call_lock = threading.Lock()   # sync routes run in a threadpool, so guard the shared dict
+
+
+def enforce_ai_rate_limit(user_id: int, bucket: str):
+    max_calls, window_seconds = AI_RATE_LIMITS[bucket]
+    now = monotonic()
+
+    with _ai_call_lock:
+        calls = _ai_call_log[(user_id, bucket)]
+
+        # Drop timestamps that have aged out of the rolling window
+        while calls and now - calls[0] >= window_seconds:
+            calls.popleft()
+
+        if len(calls) >= max_calls:
+            # The oldest call in the window is the next one to expire, so
+            # that's how long until a slot frees up.
+            retry_after = int(window_seconds - (now - calls[0])) + 1
+            raise HTTPException(
+                status_code=429,
+                detail=f"AI request limit reached. Try again in about {max(1, retry_after // 60)} minute(s).",
+                headers={"Retry-After": str(retry_after)},
+            )
+
+        calls.append(now)
 
 # This defines exactly what fields a new trade submission must contain, taken from Pydantic
 # If someone sends data missing a required field or with the wrong type,
@@ -106,16 +181,22 @@ class TradeCreate(BaseModel):
     thesis_text: str
     conviction_score: int
     review_date: date
+    # Why the trade was made, from thesis.BUY_REASONS / SELL_REASONS.
+    # Optional at the API level so older clients keep working; the Log
+    # Trade form asks for at least one.
+    reason_tags: List[str] = []
 
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 
 class WatchlistAdd(BaseModel):
     ticker: str
 
 class UserSignup(BaseModel):
-    name: str
+    name: str = Field(min_length=1, max_length=100)
     email: EmailStr
-    password: str
+    # NEW: at least 8 characters (bcrypt only reads the first 72 bytes).
+    # Login itself doesn't check length, so older short passwords still work.
+    password: str = Field(min_length=8, max_length=72)
 
 class UserLogin(BaseModel):
     email: EmailStr
@@ -365,6 +446,7 @@ def get_price_at(ticker: str, trade_date: date, trade_time: str = None):
 # can create a trade under someone else's account.
 @app.post("/trades") # When front end sents POST request to /trades this will run
 def create_trade(trade: TradeCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)): #Uses function get_db to open a connection to database
+    reason_tags = thesis.validate_tags(trade.action, trade.reason_tags)
     new_trade = Trade( #CONSTRUCTOR
         user_id=current_user.id,  # taken from the logged-in user, not the client
         ticker=trade.ticker,
@@ -376,10 +458,19 @@ def create_trade(trade: TradeCreate, db: Session = Depends(get_db), current_user
         thesis_text=trade.thesis_text,
         conviction_score=trade.conviction_score,
         review_date=trade.review_date,
+        reason_tags=",".join(reason_tags) or None,
+        thesis_written_at=datetime.utcnow(),  # written at logging time, by definition
     )
     db.add(new_trade)      # stage the new trade for saving
     db.commit()             # actually save it to the database
     db.refresh(new_trade)   # reload it, so we get the auto-generated id back
+    # NEW: run the FOMO check now, so the form can show it right away (the
+    # form's live check already warmed the price cache). Never blocks saving.
+    try:
+        fomo.ensure_scored(db, current_user, [new_trade])
+        db.refresh(new_trade)
+    except Exception as e:
+        print(f"[fomo] check after logging failed: {e}")
     return new_trade
 
 # Returns every trade currently saved in the database.
@@ -391,6 +482,14 @@ def get_trades(db: Session = Depends(get_db), current_user: User = Depends(get_c
 # Puts all trades into current holdings, calculates each position's
 # share of the total portfolio, and flags any position over 20%.
 # PROTECTED + SCOPED: only aggregates the logged-in user's own trades.
+# Share counts at or below this are treated as zero. Fractional shares are
+# stored and summed as floats, and floats can't represent most decimals
+# exactly - e.g. buying 0.1 + 0.2 shares then selling 0.3 leaves
+# 0.0000000000000000555 shares "held", which used to show up as a ghost
+# position with a nonsense avg_cost. Brokers only go to a handful of
+# decimal places, so anything this small is rounding noise, not real shares.
+SHARE_QTY_EPSILON = 1e-9
+
 @app.get("/holdings")
 def get_holdings(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     # Ordered chronologically - cost_tracking below needs trades in the order
@@ -450,6 +549,11 @@ def get_holdings(db: Session = Depends(get_db), current_user: User = Depends(get
                 avg_cost_before_sell = cost_tracking[ticker]["total_cost"] / held_qty
                 cost_tracking[ticker]["total_cost"] -= avg_cost_before_sell * qty
                 cost_tracking[ticker]["total_qty"] -= qty
+                # Fully exited (allowing for float rounding, see
+                # SHARE_QTY_EPSILON) - reset to a clean zero so leftover
+                # rounding noise can't leak into the cost of a later rebuy.
+                if cost_tracking[ticker]["total_qty"] <= SHARE_QTY_EPSILON:
+                    cost_tracking[ticker] = {"total_cost": 0, "total_qty": 0}
             # Sells reduce today's bucket first (see comment above) - capped
             # at whatever's actually in it, since a sell can also be selling
             # older shares that were never in today's bucket to begin with.
@@ -460,8 +564,9 @@ def get_holdings(db: Session = Depends(get_db), current_user: User = Depends(get
                 today_tracking[ticker]["total_cost"] -= avg_cost_today_before_sell * sell_from_today
                 today_tracking[ticker]["total_qty"] -= sell_from_today
 
-    # Step 2: drop any ticker fully sold out (0 or negative shares left)
-    holdings = {ticker: shares for ticker, shares in holdings.items() if shares > 0}
+    # Step 2: drop any ticker fully sold out (0 or negative shares left,
+    # allowing for float rounding - see SHARE_QTY_EPSILON)
+    holdings = {ticker: shares for ticker, shares in holdings.items() if shares > SHARE_QTY_EPSILON}
 
     # Step 3: look up current price for each holding, calculate dollar value
     holdings_list = []
@@ -594,10 +699,17 @@ def get_holdings(db: Session = Depends(get_db), current_user: User = Depends(get
 
 # Uses Claude to generate a bull case, bear case, and key risk for a given
 # ticker, based on data we already have cached (no new yfinance call needed).
-# NOT user-scoped - stock-level analysis, not tied to a specific portfolio.
+# The analysis itself is stock-level (not tied to a specific portfolio), but
+# the route is PROTECTED: every hit is a paid Claude call, so it requires
+# login and counts against the user's "analysis" rate limit.
 @app.get("/bullbear/{ticker}")
-def get_bull_bear(ticker: str, db: Session = Depends(get_db)):
+def get_bull_bear(ticker: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     ticker = ticker.upper()
+
+    # Checked before the price lookup too, so a rate-limited user doesn't
+    # trigger yfinance calls either. No cache on this route, so every
+    # request is a Claude call and always counts.
+    enforce_ai_rate_limit(current_user.id, "analysis")
 
     # Reuse the same helper /holdings uses - checks the cache first, and
     # automatically fetches fresh data from yfinance if it's missing or stale,
@@ -639,29 +751,45 @@ Key Risk: [1 sentence]"""
 @app.get("/thesis-reviews")
 def get_thesis_reviews(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     today = date.today()
+    # NEW: first grade every due trade the numbers can judge (grading.py,
+    # auto_grade_due) - what's left is only what needs the user. This is the
+    # one price lookup here: one cached history download per due ticker,
+    # and only for trades that just came due.
+    grading.auto_grade_due(db, current_user, today)
     due_trades = db.query(Trade).filter(
         Trade.user_id == current_user.id,
         Trade.review_date <= today,
         Trade.outcome_tag.is_(None)
-    ).all()
+    ).order_by(Trade.review_date, Trade.id).all()
 
-    reviews = []
-    for trade in due_trades:
-        fomo_result = check_fomo_for_trade(trade)  # NEW
+    # The scorecard numbers for each card still load separately
+    # (GET /thesis-reviews/{id}/scorecard), so this list stays quick.
+    return {"reviews": [review_json(trade) for trade in due_trades]}
 
-        reviews.append({
-            "id": trade.id,
-            "ticker": trade.ticker,
-            "action": trade.action,
-            "thesis_text": trade.thesis_text,
-            "conviction_score": trade.conviction_score,
-            "trade_date": trade.trade_date.isoformat(),
-            "review_date": trade.review_date.isoformat(),
-            "fomo_flag": fomo_result["fomo_flag"],  # NEW
-            "fomo_reason": fomo_result["reason"]  # NEW
-        })
 
-    return {"reviews": reviews}
+def review_json(trade: Trade) -> dict:
+    """A trade as the review screen shows it: the thesis plus WHY it was made."""
+    return {
+        "id": trade.id,
+        "ticker": trade.ticker,
+        "action": trade.action,
+        "quantity": float(trade.quantity),
+        "price_per_share": float(trade.price_per_share),
+        "thesis_text": trade.thesis_text,
+        "conviction_score": trade.conviction_score,
+        "trade_date": trade.trade_date.isoformat(),
+        "review_date": trade.review_date.isoformat() if trade.review_date else None,
+        "reasons": [{"tag": t, "label": thesis.label_for(trade.action, t)} for t in thesis.parse_tags(trade)],
+        "written_in_hindsight": thesis.is_hindsight(trade),
+        "outcome_tag": trade.outcome_tag,
+        "review_notes": trade.review_notes,
+        "suggested_outcome": trade.suggested_outcome,
+        "graded_against_numbers": grading.contradicts(trade.suggested_outcome, trade.outcome_tag),
+        "graded_return_pct": trade.graded_return_pct,
+        "graded_benchmark_return_pct": trade.graded_benchmark_return_pct,
+        "graded_at": trade.graded_at.isoformat() if trade.graded_at else None,
+        "auto_graded": bool(trade.auto_graded),
+    }
 
 # Returns trades that HAVE been graded (outcome_tag is set), most recent
 # first, for the "Recently reviewed" section — the counterpart to
@@ -672,29 +800,18 @@ def get_recent_thesis_reviews(db: Session = Depends(get_db), current_user: User 
     reviewed_trades = (
         db.query(Trade)
         .filter(Trade.user_id == current_user.id, Trade.outcome_tag.isnot(None))
-        .order_by(Trade.created_at.desc())
+        # Most recently GRADED first (was created_at, i.e. when the trade
+        # was logged). Grades from before graded_at existed sort last.
+        .order_by(Trade.graded_at.is_(None), Trade.graded_at.desc(), Trade.created_at.desc())
         .limit(10)
         .all()
     )
-
-    reviews = [
-        {
-            "id": t.id,
-            "ticker": t.ticker,
-            "action": t.action,
-            "thesis_text": t.thesis_text,
-            "conviction_score": t.conviction_score,
-            "outcome_tag": t.outcome_tag,
-            "review_notes": t.review_notes,
-        }
-        for t in reviewed_trades
-    ]
-    return {"reviews": reviews}
+    return {"reviews": [review_json(t) for t in reviewed_trades]}
 
 # Defines what a valid outcome update must look like
 class OutcomeUpdate(BaseModel):
-    outcome_tag: str  # expected: "correct", "incorrect", or "mixed"
-    review_notes: Optional[str] = None  # optional freeform reflection, saved alongside the grade
+    outcome_tag: str  # "correct", "incorrect" or "mixed" (checked in grading.apply_grade)
+    review_notes: Optional[str] = None  # freeform reflection; REQUIRED when the grade contradicts the numbers
 
 
 # Updates one specific trade's outcome_tag. Once set, that trade stops
@@ -702,25 +819,24 @@ class OutcomeUpdate(BaseModel):
 # PROTECTED + SCOPED: confirms the trade actually belongs to the logged-in
 # user before allowing the update - otherwise anyone could edit anyone
 # else's trade just by guessing an id number.
+# The rules live in grading.apply_grade: the grade is saved together with
+# the price numbers it was made against, and grading flatly against those
+# numbers (e.g. "correct" on a loser that lagged the market) needs a note.
 @app.patch("/trades/{trade_id}/outcome") #PATCH HTTP method updates something existing
 def update_trade_outcome(trade_id: int, update: OutcomeUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    trade = db.query(Trade).filter(Trade.id == trade_id, Trade.user_id == current_user.id).first()
-
-    if not trade:
-        raise HTTPException(status_code=404, detail=f"Trade with id {trade_id} not found")
-
-    trade.outcome_tag = update.outcome_tag
-    trade.review_notes = update.review_notes
-    db.commit()
-
-    return {"success": True, "id": trade_id, "outcome_tag": trade.outcome_tag, "review_notes": trade.review_notes}
+    trade = grading.apply_grade(db, current_user, trade_id, update.outcome_tag, update.review_notes)
+    return {"success": True, "id": trade_id, "outcome_tag": trade.outcome_tag, "review_notes": trade.review_notes,
+            "suggested_outcome": trade.suggested_outcome, "graded_return_pct": trade.graded_return_pct,
+            "graded_benchmark_return_pct": trade.graded_benchmark_return_pct}
 
 # Pulls recent news headlines via yfinance, sends them to Claude for a
 # single overall sentiment classification, and returns exactly one of:
 # "positive", "neutral", "negative".
 # NOT user-scoped - stock-level sentiment, not tied to a specific portfolio.
-@app.get("/sentiment/{ticker}") 
-def get_sentiment(ticker: str, db: Session = Depends(get_db)):
+# PROTECTED: a cache miss here means a paid Claude call, so the route
+# requires login and cache misses count against the "analysis" rate limit.
+@app.get("/sentiment/{ticker}")
+def get_sentiment(ticker: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     ticker = ticker.upper()  # normalize, same habit as our other stock routes
 
     # Sentiment costs a real Claude API call to generate, unlike a price
@@ -737,6 +853,11 @@ def get_sentiment(ticker: str, db: Session = Depends(get_db)):
         if cached.sentiment == "unavailable":
             raise HTTPException(status_code=404, detail=f"No news available for ticker '{ticker}'")
         return {"ticker": ticker, "sentiment": cached.sentiment, "summary": cached.summary}
+
+    # Only cache misses reach this point, so fresh cache reads above never
+    # use up the user's limit - just the requests that lead to a new
+    # Claude call.
+    enforce_ai_rate_limit(current_user.id, "analysis")
 
     # Ask yfinance for recent news articles about this ticker.
     # stock.news is a DIFFERENT dataset than stock.info - this one returns
@@ -864,44 +985,6 @@ SUMMARY: [two sentences explaining why, based on the headlines]"""
         "summary": summary
     }
 
-# Checks whether a trade was made shortly after a sharp price move (up or
-# down) - a proxy for an emotionally-driven entry rather than one based on
-# careful research. Returns a dict with the flag and reasoning, or a
-# "not enough data" fallback if history isn't available.
-def check_fomo_for_trade(trade):
-    if trade.action != "buy":
-        return {"fomo_flag": False, "reason": "Only buy trades are checked for FOMO"}
-
-    ticker = trade.ticker.upper()
-    end_date = trade.trade_date
-    start_date = end_date - timedelta(days=10)
-
-    try:
-        stock = yf.Ticker(ticker)
-        history = stock.history(start=start_date.isoformat(), end=(end_date + timedelta(days=1)).isoformat())
-    except Exception as e:
-        print(f"yfinance history fetch failed for {ticker}: {e}")
-        return {"fomo_flag": False, "reason": "Could not fetch price history"}
-
-    if history.empty or len(history) < 2:
-        return {"fomo_flag": False, "reason": "Not enough price history available to check"}
-
-    price_at_trade = float(history["Close"].iloc[-1])
-    lookback_index = max(0, len(history) - 6)
-    price_before = float(history["Close"].iloc[lookback_index])
-
-    percent_change = float(((price_at_trade - price_before) / price_before) * 100)
-
-    FOMO_THRESHOLD = 8.0
-    significant_move = bool(abs(percent_change) > FOMO_THRESHOLD)
-
-    if significant_move and percent_change > 0:
-        return {"fomo_flag": True, "reason": f"Stock rose {round(percent_change, 2)}% in the days before this trade - possible FOMO entry"}
-    elif significant_move and percent_change < 0:
-        return {"fomo_flag": True, "reason": f"Stock dropped {round(percent_change, 2)}% in the days before this trade - possible 'buying the dip'"}
-    else:
-        return {"fomo_flag": False, "reason": "No significant price move detected before this trade"}
-
 # Aggregates reviewed trades to surface behavioral patterns: whether higher
 # conviction actually correlates with better outcomes, and whether FOMO-flagged
 # trades perform worse than non-FOMO ones. This is the ground-truth data layer
@@ -909,6 +992,7 @@ def check_fomo_for_trade(trade):
 # PROTECTED + SCOPED: only the logged-in user's own reviewed trades count.
 @app.get("/trading-patterns")
 def get_trading_patterns(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    fomo.ensure_scored(db, current_user)  # scores any buys not checked yet (stored after)
     trades = db.query(Trade).filter(Trade.user_id == current_user.id).all()
 
     # Only trades that have actually been reviewed (outcome_tag set) count
@@ -944,20 +1028,22 @@ def get_trading_patterns(db: Session = Depends(get_db), current_user: User = Dep
             "correct_rate": round(correct_rate, 1)
         })
 
-    # --- Correct rate: FOMO-flagged vs non-FOMO trades ---
-    # Only "buy" trades are checked for FOMO (selling into a rally isn't FOMO -
-    # same rule check_fomo_for_trade already applies), so sells are skipped here.
-    # NOTE: this calls check_fomo_for_trade() once per reviewed buy trade, which
-    # means a live yfinance lookup each time - fine for now, but worth caching
-    # the FOMO result on the trade itself once there's real trade volume.
+    # --- Correct rate: FOMO (chasing) buys vs calm ones ---
+    # Uses the FOMO check stored on each buy (fomo.py), so no price
+    # downloads here once trades are scored. Only buys are checked; "dip"
+    # buys (after a sharp drop) are a different habit and left out of both,
+    # as are buys with too little price history to judge. A buy the user
+    # tagged "Fear of missing out" counts as FOMO whatever the score says.
     fomo_stats = {"correct": 0, "incorrect": 0, "mixed": 0, "total": 0}
     non_fomo_stats = {"correct": 0, "incorrect": 0, "mixed": 0, "total": 0}
 
     for t in reviewed:
         if t.action != "buy":
             continue
-        fomo_result = check_fomo_for_trade(t)
-        target = fomo_stats if fomo_result["fomo_flag"] else non_fomo_stats
+        group = fomo.group_of(t)
+        if group not in ("chasing", "warm", "calm"):
+            continue
+        target = fomo_stats if group == "chasing" else non_fomo_stats
         target[t.outcome_tag] += 1
         target["total"] += 1
 
@@ -980,18 +1066,22 @@ def get_trading_patterns(db: Session = Depends(get_db), current_user: User = Dep
 # the frontend can log the user straight in without a separate login step.
 @app.post("/auth/signup", response_model=TokenResponse)
 def signup(payload: UserSignup, db: Session = Depends(get_db)):
-    existing = db.query(User).filter(User.email == payload.email).first()
-    if existing:
+    # NEW: emails are stored lower-case and compared case-insensitively, so
+    # "David@x.com" and "david@x.com" can't become two accounts.
+    if accounts.find_user_by_email(db, payload.email):
         raise HTTPException(status_code=400, detail="An account with this email already exists")
 
     new_user = User(
-        name=payload.name,
-        email=payload.email,
+        name=payload.name.strip(),
+        email=accounts.normalize_email(payload.email),
         hashed_password=hash_password(payload.password)
     )
     db.add(new_user)
     db.commit()
     db.refresh(new_user)
+
+    # NEW: "confirm your email" link - best effort, never blocks signing up.
+    accounts.send_verification_quietly(db, new_user)
 
     token = create_access_token(new_user.id)
     return {"access_token": token}
@@ -1003,10 +1093,15 @@ def signup(payload: UserSignup, db: Session = Depends(get_db)):
 # since that tells an attacker whether a given email has an account here.
 @app.post("/auth/login", response_model=TokenResponse)
 def login(payload: UserLogin, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.email == payload.email).first()
+    # NEW: after 10 wrong passwords for one email in 15 minutes, that email
+    # is locked out until the window passes (accounts.py).
+    accounts.check_login_allowed(payload.email)
+    user = accounts.find_user_by_email(db, payload.email)
     if not user or not verify_password(payload.password, user.hashed_password):
+        accounts.record_login_failure(payload.email)
         raise HTTPException(status_code=401, detail="Incorrect email or password")
 
+    accounts.clear_login_failures(payload.email)
     token = create_access_token(user.id)
     return {"access_token": token}
 
@@ -1015,7 +1110,9 @@ def login(payload: UserLogin, db: Session = Depends(get_db)):
 # whatever token is currently stored client-side.
 @app.get("/auth/me")
 def get_me(current_user: User = Depends(get_current_user)):
-    return {"id": current_user.id, "name": current_user.name, "email": current_user.email}
+    return {"id": current_user.id, "name": current_user.name, "email": current_user.email,
+            # NEW: the frontend shows the demo banner / "confirm your email" prompts from these
+            "email_verified": bool(current_user.email_verified), "is_demo": bool(current_user.is_demo)}
 
 # Saves or updates the logged-in user's survey answers. Same endpoint
 # handles both the initial signup-survey submission and later edits from
@@ -1077,9 +1174,6 @@ def get_profile(db: Session = Depends(get_db), current_user: User = Depends(get_
         "biggest_fear": profile.biggest_fear,
     }
 
-class ChatMessageIn(BaseModel):
-    message: str
-
 # Gathers everything the advisor needs to answer grounded, personalized
 # questions: the user's stated profile, current holdings, trading-pattern
 # stats, and a sample of recent trades with their theses. Rebuilt fresh on
@@ -1116,17 +1210,24 @@ Stated fear/mistake: {profile.biggest_fear or "not provided"}
     ) or "No current holdings."
 
     trades_summary = "\n".join(
-    f"- {t.trade_date} {t.action.upper()} {t.ticker}: conviction {t.conviction_score}/5, "
-    f"thesis: \"{t.thesis_text}\", outcome: {t.outcome_tag or 'not yet reviewed'}"
+    f"- {t.trade_date} {t.action.upper()} {t.ticker}: conviction "
+    f"{f'{t.conviction_score}/5' if t.conviction_score else 'n/a'}, "
+    f"{thesis.describe_trade_reason(t)}, outcome: {grading.describe_grade(t)}"
     + (f", reflection: \"{t.review_notes}\"" if t.review_notes else "")
     for t in recent_trades
 ) or "No trades logged yet."
 
+    # Why the user trades, in their own words/categories - updated every
+    # time they answer the thesis inbox, so the advisor's picture of their
+    # habits stays current (see thesis.advisor_context_section).
+    reasons_summary = thesis.advisor_context_section(db, current_user)
+
     patterns_summary = f"""
 Reviewed trades: {patterns_data['reviewed_count']}, pending review: {patterns_data['pending_count']}
 By conviction score: {patterns_data['by_conviction']}
-FOMO-flagged trades correct rate: {patterns_data['fomo_vs_non_fomo']['fomo']['correct_rate']}%
-Non-FOMO trades correct rate: {patterns_data['fomo_vs_non_fomo']['non_fomo']['correct_rate']}%
+FOMO (chasing) buys correct rate: {patterns_data['fomo_vs_non_fomo']['fomo']['correct_rate']}% of {patterns_data['fomo_vs_non_fomo']['fomo']['total']}
+Calm buys correct rate: {patterns_data['fomo_vs_non_fomo']['non_fomo']['correct_rate']}% of {patterns_data['fomo_vs_non_fomo']['non_fomo']['total']}
+{fomo.advisor_context_section(db, current_user)}
 """
 
     # NEW - per-holding fundamentals, so the advisor can reason about
@@ -1159,33 +1260,39 @@ Non-FOMO trades correct rate: {patterns_data['fomo_vs_non_fomo']['non_fomo']['co
         )
     fundamentals_summary = "\n".join(fundamentals_lines) or "No fundamentals data available."
 
-    return f"""You are InnerStock's investing advisor.
+    # NEW: extra snapshot facts for the tool-using advisor (advisor.py),
+    # so it knows what's going on before deciding what to look up.
+    today = date.today()
+    watchlist = [w.ticker for w in db.query(Watchlist).filter(Watchlist.user_id == current_user.id).all()]
+    due_reviews = db.query(Trade).filter(
+        Trade.user_id == current_user.id, Trade.review_date <= today, Trade.outcome_tag.is_(None)
+    ).count()
+    unread_recaps = (
+        db.query(EarningsNotification, EarningsRecap)
+        .join(EarningsRecap, EarningsNotification.recap_id == EarningsRecap.id)
+        .filter(EarningsNotification.user_id == current_user.id, EarningsNotification.read_at.is_(None))
+        .order_by(EarningsRecap.report_date.desc())
+        .limit(5)
+        .all()
+    )
+    recaps_summary = "\n".join(
+        f"- {n.display_ticker} reported {r.report_date}: {r.headline} ({r.sentiment})" for n, r in unread_recaps
+    ) or "None."
 
-Be conversational, practical, and concise. Match the depth of your answer to the user's question.
+    # Sector exposure by portfolio weight, from the same PriceCache rows
+    # the fundamentals block reads.
+    sector_weights = {}
+    for h in holdings_data["holdings"]:
+        cached_price = db.query(PriceCache).filter(PriceCache.ticker == h["ticker"]).first()
+        sector = (cached_price.sector if cached_price else None) or "Unknown / fund"
+        sector_weights[sector] = sector_weights.get(sector, 0) + h["percentage"]
+    sector_summary = ", ".join(
+        f"{sector} {weight:.0f}%" for sector, weight in sorted(sector_weights.items(), key=lambda kv: -kv[1])
+    ) or "n/a"
 
-Default behavior:
-- Keep answers under 120 words unless the user asks for more detail.
-- Simple factual questions: 1–2 sentences.
-- Portfolio questions: 2–5 short bullet points.
-- Comparisons or explanations: 1–3 short paragraphs.
-- Give detailed analysis only when the user explicitly requests it (e.g. "analyze", "explain in depth", "walk me through", or "give me a detailed report").
-
-Use only the user's profile, holdings, fundamentals, trades, or behavioral patterns that are relevant to the current question. Don't force portfolio references into general investing questions.
-
-If important information is missing, ask one brief clarifying question instead of making assumptions.
-
-Response formatting:
-- Use Markdown naturally.
-- Start with a one-sentence direct answer.
-- Use at most 2-3 headings only when they improve readability.
-- Keep paragraphs to 1-2 sentences.
-- Use bullet points for lists.
-- Never center text or stack multiple bold headings.
-- If giving a personalized insight, put it under a short "For your portfolio" section.
-
-When relevant, help the user recognize patterns in their own investing behavior—such as concentration risk, FOMO, or conviction consistency—using their actual data.
-
-Do not give generic investing advice. Ground your answers in the real data below whenever relevant. You are not a licensed financial advisor; make that clear if the user asks for concrete buy/sell recommendations.
+    # The instructions themselves are advisor.ADVISOR_INSTRUCTIONS; this is
+    # only the facts block that follows them.
+    return f"""Today's date: {today.isoformat()}
 
 === USER PROFILE ===
 {profile_summary}
@@ -1203,78 +1310,27 @@ Average conviction across positions: {holdings_data['avg_conviction']}/5
 
 === BEHAVIORAL PATTERNS ===
 {patterns_summary}
+
+=== WHY THIS USER TRADES (their own stated reasons) ===
+{reasons_summary}
+
+=== PORTFOLIO SHAPE ===
+Sector exposure by weight: {sector_summary}
+Note: holding values are in each listing's own currency (TSX .TO listings in CAD, US listings in USD) and the total adds them as-is, so weights are approximate when both are held.
+
+=== WATCHLIST ===
+{", ".join(watchlist) or "Empty."}
+
+=== OPEN ITEMS ===
+Trades due for review (review date passed, not graded yet): {due_reviews}
+Unread earnings recaps for holdings:
+{recaps_summary}
 """
 
-# The advisor chat. Saves the user's message, rebuilds full context fresh,
-# sends the conversation history + context to Claude, saves and returns
-# the reply. PROTECTED + SCOPED - only ever sees and stores this user's
-# own data and conversation.
-@app.post("/chat")
-def chat(payload: ChatMessageIn, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    # Save the user's new message first - stored immediately, before we
-    # even talk to Claude, so it's never lost even if something below fails.
-    user_message = ChatMessage(user_id=current_user.id, role="user", content=payload.message)
-    db.add(user_message)
-    db.commit()
-
-    # Pull recent conversation history (capped at 40, to avoid unbounded
-    # token growth as a conversation gets long) so Claude has continuity
-    # across turns - this is what gives the chatbot "memory."
-    history = (
-        db.query(ChatMessage)
-        .filter(ChatMessage.user_id == current_user.id)
-        .order_by(ChatMessage.created_at.asc())
-        .limit(40)
-        .all()
-    )
-
-    # Rebuilt fresh every message (not cached) since holdings/stats can
-    # change mid-conversation, e.g. if the user logs a new trade while chatting.
-    context = build_advisor_context(db, current_user)
-
-    # Reshape DB rows into the plain {role, content} format Claude's API
-    # expects - strips out fields like id/created_at that Claude doesn't need.
-    messages = [{"role": m.role, "content": m.content} for m in history]
-
-    try:
-        response = claude_client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=350,
-            system=context,       # background knowledge - invisible to the
-                                   # user, shapes every answer without being
-                                   # part of the visible conversation
-            messages=messages,    # the actual back-and-forth, including
-                                   # the new message just saved above
-        )
-        reply_text = response.content[0].text
-
-        # Log real token usage and estimated cost for this call, so actual
-        # spend can be tracked during testing instead of guessed at.
-        input_tokens = response.usage.input_tokens
-        output_tokens = response.usage.output_tokens
-        input_cost = (input_tokens / 1_000_000) * 1.00
-        output_cost = (output_tokens / 1_000_000) * 5.00
-        total_cost = input_cost + output_cost
-        print(
-            f"[chat cost] user_id={current_user.id} "
-            f"input_tokens={input_tokens} output_tokens={output_tokens} "
-            f"estimated_cost=${total_cost:.5f}"
-        )
-
-    except Exception as e:
-        print(f"Claude API call failed for chat: {e}")
-        raise HTTPException(status_code=500, detail="Could not generate a response right now")
-
-    # Save Claude's reply too, tagged as "assistant" - this is what makes
-    # it show up in history the NEXT time this function runs, which is how
-    # the conversation actually persists and grows over time.
-    assistant_message = ChatMessage(user_id=current_user.id, role="assistant", content=reply_text)
-    db.add(assistant_message)
-    db.commit()
-
-    # Frontend only needs the new reply here - it already has (or can
-    # separately fetch) everything that came before.
-    return {"reply": reply_text}
+# NEW: the advisor chat itself (POST /chat, plus GET /chat/suggestions)
+# lives in advisor.py - Claude with read-only tools that look up prices,
+# news, earnings and the user's own trades. build_advisor_context above
+# still supplies the per-message snapshot it starts from.
 
 
 # Returns the full saved conversation for the logged-in user - no Claude
@@ -1290,129 +1346,17 @@ def get_chat_history(db: Session = Depends(get_db), current_user: User = Depends
     )
     return {"messages": [{"role": m.role, "content": m.content} for m in messages]}
 
-# Accepts a Wealthsimple "Activities" export CSV directly, in Wealthsimple's
-# own column format (effective_at, activity_type, activity_sub_type, symbol,
-# quantity, unit_price, etc.). Only rows where activity_type == "Trade" are imported; deposits,
-# withdrawals, and other MoneyMovement rows are skipped entirely. Imported
-# trades have no thesis_text/conviction_score/review_date, since Wealthsimple
-# has no concept of any of those - they're left null until the user fills
-# them in manually later.
-@app.post("/trades/import/wealthsimple")
-async def import_trades_wealthsimple(file: UploadFile = File(...), db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    contents = await file.read()
-    decoded = contents.decode("utf-8")
-    reader = csv.DictReader(io.StringIO(decoded))
-
-    successful_count = 0
-    skipped_count = 0
-    errors = []
-
-    for row_num, row in enumerate(reader, start=1):
-        activity_type = (row.get("activity_type") or "").strip()
-
-        # Skip anything that isn't an actual buy/sell trade - deposits,
-        # e-Transfers, withdrawals, dividends, etc. all show up in this
-        # same export but aren't trades.
-        if activity_type != "Trade":
-            skipped_count += 1
-            continue
-
-        try:
-            sub_type = (row.get("activity_sub_type") or "").strip().upper()
-            if sub_type not in ("BUY", "SELL"):
-                raise ValueError(f"Unrecognized trade sub-type: {sub_type}")
-            action = sub_type.lower()
-
-            ticker = (row.get("symbol") or "").strip()
-            if not ticker:
-                raise ValueError("symbol must not be empty")
-
-            # Wealthsimple's CSV gives no exchange field, so a bare symbol like "GOOG"
-            # is ambiguous - could be the real Nasdaq stock or a CAD-hedged CDR sharing
-            # the same root symbol (priced completely differently, ~$54 vs ~$180).
-            # The description's "FX Rate: ..." marker is our only signal: its presence
-            # means a real US-priced security, its absence means CAD-native (TSX ETF
-            # or CDR) - so append ".TO" only when there's no FX Rate, and leave symbols
-            # Wealthsimple already suffixed (e.g. "HUT.TO") untouched.
-            description = row.get("description") or ""
-            if "." not in ticker and "FX Rate" not in description:
-                ticker = f"{ticker}.TO"
-
-            # Wealthsimple signs quantity negative for sells - take the
-            # absolute value, since action already carries buy/sell direction.
-            try:
-                quantity = abs(float(row.get("quantity")))
-            except (ValueError, TypeError):
-                raise ValueError("quantity must be a number")
-            if quantity <= 0:
-                raise ValueError("quantity must be greater than 0")
-
-            try:
-                price_per_share = float(row.get("unit_price"))
-            except (ValueError, TypeError):
-                raise ValueError("unit_price must be a number")
-            if price_per_share <= 0:
-                raise ValueError("unit_price must be greater than 0")
-
-            # Wealthsimple's unit_price for a real US stock is already
-            # CAD-converted (e.g. "FX Rate: 1.3926" in the description means
-            # the $134.03 unit_price is CAD, not USD). But get_or_fetch_price
-            # looks these bare tickers up on yfinance, which returns USD -
-            # so storing the CAD price here would compare CAD cost basis
-            # against USD current price later (a ~40% phantom loss). Divide
-            # back out by the trade's own FX rate so price_per_share ends up
-            # in the same currency (USD) that the live price will be in.
-            # CAD-native tickers (already suffixed ".TO" above) have no FX
-            # Rate and are left as-is, since both sides stay in CAD.
-            fx_match = re.search(r"FX Rate:\s*([\d.]+)", description)
-            if fx_match:
-                fx_rate = float(fx_match.group(1))
-                price_per_share = price_per_share / fx_rate
-
-            # effective_at is a full ISO timestamp with time and timezone,
-            # e.g. "2026-04-15T12:03:38-04:00" - only the date portion is
-            # needed, so split off everything from "T" onward.
-            effective_at_raw = (row.get("effective_at") or "").strip()
-            if not effective_at_raw:
-                raise ValueError("effective_at must not be empty")
-            try:
-                trade_date = date.fromisoformat(effective_at_raw.split("T")[0])
-            except ValueError:
-                raise ValueError(f"Could not parse date from: {effective_at_raw}")
-
-            new_trade = Trade(
-                user_id=current_user.id,
-                ticker=ticker.upper(),
-                action=action,
-                quantity=quantity,
-                price_per_share=price_per_share,
-                trade_date=trade_date,
-                thesis_text=None,
-                conviction_score=None,
-                review_date=None,
-            )
-            db.add(new_trade)
-            db.commit()
-            successful_count += 1
-
-        except ValueError as e:
-            db.rollback()
-            errors.append({"row": row_num, "message": str(e)})
-
-    return {
-        "successful_count": successful_count,
-        "skipped_count": skipped_count,
-        "errors": errors
-    }
-
-# Returns trades missing a thesis - the imported-but-unreviewed backlog
-# a user needs to work through after a bulk import, distinct from
+# Returns trades missing a thesis - the backlog of trades synced from a
+# linked brokerage (see snaptrade_sync.py) that a user still needs to write
+# a thesis for, distinct from
 # /thesis-reviews which only shows trades whose review_date has passed.
 @app.get("/trades/incomplete")
 def get_incomplete_trades(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    # Same definition as the thesis inbox: no thesis AND no reason given
+    # (a "don't remember" answer has reasons but no thesis text).
     trades = (
         db.query(Trade)
-        .filter(Trade.user_id == current_user.id, Trade.thesis_text.is_(None))
+        .filter(*thesis.needs_reason_filter(current_user))
         .order_by(Trade.trade_date.desc())
         .all()
     )

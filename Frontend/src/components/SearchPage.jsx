@@ -3,6 +3,7 @@ import { IconSearch } from "@tabler/icons-react"
 import { searchTickers } from "../tickers"
 import { apiFetch } from "../api"
 import StockChart from "./StockChart"
+import FomoCheck from "./FomoCheck"
 
 function SearchPage() {
   const [query, setQuery] = useState("")
@@ -11,6 +12,12 @@ function SearchPage() {
   const [info, setInfo] = useState(null)
   const [error, setError] = useState(null)
   const [watchlistStatus, setWatchlistStatus] = useState(null) // null | "adding" | "added" | "error"
+  // NEW - "Am I chasing this?": the FOMO check for buying right now, BEFORE
+  // the order is placed (Backend/fomo.py). The amount is optional - it lets
+  // the check compare the buy to your usual size.
+  const [fomoAmount, setFomoAmount] = useState("")
+  const [fomoResult, setFomoResult] = useState(null)
+  const [fomoStatus, setFomoStatus] = useState(null) // null | "checking" | error text
 
   function handleQueryChange(value) {
     setQuery(value)
@@ -24,6 +31,8 @@ function SearchPage() {
     setInfo(null)
     setError(null)
     setWatchlistStatus(null)
+    setFomoResult(null)
+    setFomoStatus(null)
 
     try {
       const res = await apiFetch(`/stock/${ticker}`)
@@ -42,6 +51,25 @@ function SearchPage() {
     if (!query.trim()) return
     // Exact-symbol fallback if nothing in the static list matched
     await selectTicker(query.trim().toUpperCase())
+  }
+
+  async function handleFomoCheck(e) {
+    e.preventDefault()
+    setFomoStatus("checking")
+    setFomoResult(null)
+    try {
+      const res = await apiFetch("/fomo/check", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ticker: selected, dollars: Number(fomoAmount) > 0 ? Number(fomoAmount) : null }),
+      })
+      const data = await res.json().catch(() => null)
+      if (!res.ok) throw new Error(data?.detail || "Couldn't run the check.")
+      setFomoResult(data)
+      setFomoStatus(data.band === "unknown" ? "Not enough price history to check this one." : null)
+    } catch (err) {
+      setFomoStatus(err.message)
+    }
   }
 
   async function handleAddToWatchlist() {
@@ -141,6 +169,20 @@ function SearchPage() {
               <div>{info.sector || "—"}</div>
             </div>
           </div>
+
+          <form className="fomo-ask" onSubmit={handleFomoCheck}>
+            <div>
+              <strong>Thinking of buying {info.ticker}?</strong>
+              <span>Check whether you'd be chasing it, before you place the order.</span>
+            </div>
+            <input type="number" min="0" step="any" placeholder="Amount $ (optional)" value={fomoAmount}
+              onChange={(e) => setFomoAmount(e.target.value)} />
+            <button type="submit" className="btn btn-accent" disabled={fomoStatus === "checking"}>
+              {fomoStatus === "checking" ? "Checking…" : "Am I chasing this?"}
+            </button>
+          </form>
+          {fomoStatus && fomoStatus !== "checking" && <p className="fomo-quiet">{fomoStatus}</p>}
+          <FomoCheck result={fomoResult} title={`Buying ${info.ticker} now`} />
         </div>
       )}
 

@@ -1,5 +1,11 @@
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { apiFetch } from "../api"
+import ReasonChips from "./ReasonChips"
+import FomoCheck from "./FomoCheck"
+
+// NEW: how long the form waits after the last keystroke before re-running
+// the live FOMO check, so typing a ticker doesn't fire one per letter.
+const FOMO_CHECK_DELAY_MS = 700
 
 // All the state, validation, and submit logic below is UNCHANGED from the
 // current version — same fields, same validate() rules, same handleSubmit
@@ -18,7 +24,17 @@ function TradeForm({ onTradeLogged }) {
     thesis_text: "",
     conviction_score: 3,
     review_date: "",
+    reason_tags: [], // NEW - why, as categories (see ReasonChips / thesis.py)
   })
+
+  // NEW - the reason catalog ({buy: [...], sell: [...]}) from the backend.
+  const [reasonOptions, setReasonOptions] = useState(null)
+  useEffect(() => {
+    apiFetch("/trades/reasons")
+      .then((response) => (response.ok ? response.json() : null))
+      .then(setReasonOptions)
+      .catch(() => setReasonOptions(null))
+  }, [])
 
   const [status, setStatus] = useState(null)
   const [errorMessage, setErrorMessage] = useState("")
@@ -34,6 +50,36 @@ function TradeForm({ onTradeLogged }) {
   // intraday match once trade_time is filled in too. A manually-typed
   // price is never touched either way.
   const [priceAutofilled, setPriceAutofilled] = useState(false)
+
+  // NEW - the live FOMO check (POST /fomo/check, Backend/fomo.py) for the
+  // buy being logged: was the stock running hot, and were you rushed? It
+  // never blocks saving - it's there so the reason you pick is honest.
+  const [fomoCheck, setFomoCheck] = useState(null)
+  useEffect(() => {
+    const ready = form.action === "buy" && form.ticker.trim() && form.trade_date && Number(form.price_per_share) > 0
+    const timer = setTimeout(() => {
+      if (!ready) {
+        setFomoCheck(null)
+        return
+      }
+      apiFetch("/fomo/check", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ticker: form.ticker.trim(),
+          trade_date: form.trade_date,
+          trade_time: form.trade_time || null,
+          price: Number(form.price_per_share),
+          quantity: Number(form.quantity) > 0 ? Number(form.quantity) : null,
+        }),
+      })
+        .then((response) => (response.ok ? response.json() : null))
+        .then(setFomoCheck)
+        .catch(() => setFomoCheck(null))
+    }, ready ? FOMO_CHECK_DELAY_MS : 0)
+    return () => clearTimeout(timer)
+  }, [form.action, form.ticker, form.trade_date, form.trade_time, form.price_per_share, form.quantity])
+  const looksLikeAChase = fomoCheck && (fomoCheck.band === "chasing" || fomoCheck.band === "warm")
 
   function handleChange(e) {
     const { name, value } = e.target
@@ -51,7 +97,8 @@ function TradeForm({ onTradeLogged }) {
   // "buy" or "sell" into form.action), just triggered by clicking one of
   // the two toggle buttons instead of picking from a dropdown.
   function handleActionClick(action) {
-    setForm((prev) => ({ ...prev, action }))
+    // Buy and sell reasons are different lists, so switching side clears them.
+    setForm((prev) => ({ ...prev, action, reason_tags: prev.action === action ? prev.reason_tags : [] }))
   }
 
   function handleConvictionClick(score) {
@@ -64,6 +111,7 @@ function TradeForm({ onTradeLogged }) {
     if (!form.price_per_share || Number(form.price_per_share) <= 0) return "Price must be greater than 0."
     if (!form.trade_date) return "Trade date is required."
     if (!form.trade_time) return "Trade time is required."
+    if (reasonOptions && form.reason_tags.length === 0) return "Pick at least one reason for this trade."
     if (!form.thesis_text.trim()) return "You must write a thesis before logging this trade."
     if (form.conviction_score < 1 || form.conviction_score > 5) return "Conviction score must be between 1 and 5."
     if (!form.review_date) return "Review date is required."
@@ -96,7 +144,7 @@ function TradeForm({ onTradeLogged }) {
       setErrorMessage("")
       setForm({
         ticker: "", action: "buy", quantity: "", price_per_share: "",
-        trade_date: "", trade_time: "", thesis_text: "", conviction_score: 3, review_date: "",
+        trade_date: "", trade_time: "", thesis_text: "", conviction_score: 3, review_date: "", reason_tags: [],
       })
       setPriceNote("")
       setPriceAutofilled(false)
@@ -259,6 +307,19 @@ function TradeForm({ onTradeLogged }) {
         <div className="trade-card reasoning-card">
           <div className="reasoning-prompt">What's your reasoning?</div>
 
+          {reasonOptions && (
+            <div className="field">
+              <label>Reasons (pick all that apply)</label>
+              {/* No "Don't remember" here - you're logging the trade right now. */}
+              <ReasonChips
+                options={reasonOptions[form.action]}
+                selected={form.reason_tags}
+                onChange={(reason_tags) => setForm((prev) => ({ ...prev, reason_tags }))}
+                includeDontRemember={false}
+              />
+            </div>
+          )}
+
           <div className="field">
             <textarea name="thesis_text" value={form.thesis_text} onChange={handleChange} />
           </div>
@@ -280,6 +341,18 @@ function TradeForm({ onTradeLogged }) {
           </div>
         </div>
       </div>
+
+      <FomoCheck result={fomoCheck}>
+        {looksLikeAChase && reasonOptions && !form.reason_tags.includes("fomo") && (
+          <div className="fomo-nudge">
+            <span>Be honest with future you: was some of this fear of missing out?</span>
+            <button type="button" className="btn"
+              onClick={() => setForm((prev) => ({ ...prev, reason_tags: [...prev.reason_tags, "fomo"] }))}>
+              Yes, add "Fear of missing out"
+            </button>
+          </div>
+        )}
+      </FomoCheck>
 
       <div style={{ display: "flex", justifyContent: "flex-end", gap: "8px", marginTop: "var(--space-lg)" }}>
         <button type="submit" className="btn btn-primary">

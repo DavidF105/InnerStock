@@ -21,3 +21,6 @@ build/
 # Test cache
 .pytest_cache/
 *.db.backup*
+
+# Private notes for Claude Code - kept on this computer, not on GitHub.
+CLAUDE.md

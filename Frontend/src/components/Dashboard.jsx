@@ -3,6 +3,7 @@ import StatsCards from "./StatsCards"
 import HoldingsTable from "./HoldingsTable"
 import BrokerageCard from "./BrokerageCard"
 import FomoCard from "./FomoCard"
+import PortfolioChart from "./PortfolioChart"
 import { apiFetch } from "../api"
 
 // How often the dashboard re-polls /holdings for updated prices while the
@@ -129,9 +130,13 @@ function Dashboard({ refreshKey, onNavigate, inboxCount = 0, onBrokerageSynced }
     body = <p style={{ color: "var(--color-danger)" }}>Failed to load dashboard: {error}</p>
   } else if (!data || data.holdings.length === 0) {
     body = (
-      <p style={{ color: "var(--color-text-secondary)" }}>
-        No holdings yet — log a trade or sync your brokerage to get started.
-      </p>
+      <>
+        <p style={{ color: "var(--color-text-secondary)" }}>
+          No holdings yet — log a trade or sync your brokerage to get started.
+        </p>
+        {/* Sold everything? Your buys still have a FOMO record. */}
+        <FomoCard refreshKey={`${refreshKey}-${syncKey}`} />
+      </>
     )
   } else {
     body = (
@@ -146,6 +151,8 @@ function Dashboard({ refreshKey, onNavigate, inboxCount = 0, onBrokerageSynced }
           accuracyPercent={accuracyPercent}
           gradedCount={gradedCount}
         />
+        {/* NEW: value over time vs the S&P 500 (portfolio_history.py) */}
+        <PortfolioChart refreshKey={`${refreshKey}-${syncKey}`} liveTotal={data.total_value} />
         <HoldingsTable holdings={data.holdings} />
         {/* NEW: how chasing vs calm buys have done for you (fomo.py) */}
         <FomoCard refreshKey={`${refreshKey}-${syncKey}`} />

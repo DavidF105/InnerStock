@@ -32,6 +32,7 @@ PROTECTED_GET_ROUTES = [
     "/notifications",
     "/fomo/summary",
     "/fomo/waits",
+    "/portfolio/history",
     "/chat/suggestions",
     "/auth/me",
 ]

@@ -119,11 +119,12 @@ HOT_BANDS = ("chasing", "warm")
 
 # "Wait 3 days": the answer is the close this many sessions after the check.
 WAIT_SESSIONS = 3
+NO_REAL_DIFFERENCE_PCT = 1.0   # a move smaller than this is "about the same", not a win or a loss
 MAX_OPEN_WAITS = 20
 MAX_RESOLVE_PER_REQUEST = 10
 WAITS_LISTED = 30
 
-RESCORE_UNKNOWN_AFTER = timedelta(days=1)  # retry "not enough history" daily
+RESCORE_UNKNOWN_AFTER = timedelta(hours=1)  # retry "not enough history" (and cool-off gaps) hourly - cheap, prices are cached
 MAX_SCORE_PER_REQUEST = 30
 MAX_WORKERS = 8
 
@@ -419,7 +420,7 @@ def _needs_check(t: Trade, today: date, now: datetime) -> bool:
     if t.week_later_pct is None and today >= week_due and checked_on < week_due:
         return True
     # Hot buys get the cool-off once two weeks of closes exist. Checks made
-    # before this existed (or that failed) are retried at most once a day.
+    # before this existed (or that failed) are retried at most once an hour.
     cool_due = t.trade_date + timedelta(days=COOL_OFF_DAYS)
     if is_hot(t) and today >= cool_due and "cool_off" not in _saved(t):
         return checked_on < cool_due or now - t.fomo_checked_at > RESCORE_UNKNOWN_AFTER
@@ -450,6 +451,12 @@ def ensure_scored(db: Session, user: User, trades=None, today: date = None, limi
     def run(job):
         try:
             closes, volumes, bench = market_data(job["ticker"], job["trade_date"], today)
+            if not closes:
+                # No prices at all = the download failed (Yahoo often refuses
+                # cloud servers for a while). That's not "not enough history":
+                # leave the buy unchecked so the next request tries again.
+                print(f"[fomo] no prices for {job['ticker']} - will retry")
+                return None
             result = score_buy(trade_date=job["trade_date"], trade_time=job["trade_time"], price=job["price"],
                                quantity=job["quantity"], closes=closes, volumes=volumes,
                                bench_closes=bench, habits=job["habits"])
@@ -555,6 +562,8 @@ def personal_record(db: Session, user: User) -> dict:
 
     tagged = [t for t in buys if "fomo" in thesis.parse_tags(t) and t.fomo_band and t.fomo_band != "unknown"]
     return {
+        "buys": len(buys),
+        "unchecked": sum(1 for t in buys if not t.fomo_band or t.fomo_band == "unknown"),
         "waiting": waiting,
         "waits": waits_summary(db, user),
         "groups": groups,
@@ -755,13 +764,13 @@ def wait_message(w: FomoWait) -> str:
                 f"{w.remind_on.strftime('%a %b %d').replace(' 0', ' ')}.")
     later = f"{WAIT_SESSIONS} trading days later it closed at ${w.result_price:,.2f} ({change:+.1f}%)"
     per_share = abs(w.price - w.result_price)
-    if change < 0:
+    if abs(change) < NO_REAL_DIFFERENCE_PCT:
+        verdict = "about the same - no real difference either way"
+    elif change < 0:
         verdict = f"waiting saved you ${saved:,.0f}" if saved is not None else f"waiting saved ${per_share:,.2f} a share"
-    elif change > 0:
+    else:
         verdict = (f"waiting cost ${abs(saved):,.0f} this time" if saved is not None
                    else f"waiting cost ${per_share:,.2f} a share this time")
-    else:
-        verdict = "no difference"
     return f"You almost bought {w.ticker} at ${w.price:,.2f} on {when}. {later}: {verdict}."
 
 
@@ -775,6 +784,9 @@ def serialize_wait(w: FomoWait) -> dict:
         "status": "waiting" if w.result_price is None else "answered",
         "result_date": w.result_date.isoformat() if w.result_date else None,
         "result_price": w.result_price, "change_pct": change, "saved": saved,
+        # paid_off / cost / same: how the answer reads (a tiny move is "same")
+        "verdict": None if change is None else "same" if abs(change) < NO_REAL_DIFFERENCE_PCT
+                   else "paid_off" if change < 0 else "cost",
         "unread": w.result_price is not None and w.seen_at is None,
         "message": wait_message(w),
     }

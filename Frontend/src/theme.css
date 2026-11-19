@@ -1576,3 +1576,41 @@ input, select, textarea, button {
 .fomo-link { margin-left: auto; background: none; border: none; padding: 0; color: var(--color-text-secondary); font-size: var(--text-xs); text-decoration: underline; cursor: pointer; }
 .fomo-section:last-of-type { padding-bottom: var(--space-sm); }
 .wait-card .recap-title svg { color: var(--color-text-secondary); }
+.fomo-card-pending { padding-top: var(--space-md); }
+
+/* NEW: company logos (StockLogo.jsx) - same footprint as .ticker-badge.
+   A white tile, because most logos are drawn for light backgrounds. */
+.ticker-logo {
+  width: 28px; height: 28px; border-radius: 7px; flex-shrink: 0;
+  background: #fff; border: 1px solid var(--color-border-strong);
+  object-fit: contain; padding: 2px; box-sizing: border-box;
+}
+
+/* NEW: the dashboard's portfolio chart (PortfolioChart.jsx) */
+.portfolio-chart { margin-bottom: var(--space-lg); }
+.portfolio-chart-head {
+  display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between;
+  gap: var(--space-sm); padding: var(--space-md) var(--space-md) 0;
+}
+.portfolio-chart-value { font-size: 30px; font-weight: var(--font-weight-medium); font-variant-numeric: tabular-nums; line-height: 1.2; }
+.portfolio-chart-change { font-size: var(--text-sm); font-weight: var(--font-weight-medium); font-variant-numeric: tabular-nums; }
+.portfolio-chart-range { color: var(--color-text-muted); font-weight: var(--font-weight-normal); }
+.portfolio-legend {
+  list-style: none; margin: var(--space-sm) 0 0; padding: 0 var(--space-md);
+  display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: var(--text-xs); color: var(--color-text-secondary);
+}
+.portfolio-legend li { display: inline-flex; align-items: center; gap: 6px; }
+.portfolio-legend strong, .portfolio-tooltip strong { color: var(--color-text-primary); font-weight: var(--font-weight-medium); font-variant-numeric: tabular-nums; }
+.swatch { display: inline-block; width: 14px; height: 0; border-top: 3px solid transparent; border-radius: 2px; margin-right: 6px; vertical-align: middle; }
+.swatch:not(.dashed):not(.dotted) { height: 3px; border: none; }
+.swatch.dashed { border-top-style: dashed; border-top-width: 2px; }
+.swatch.dotted { border-top-style: dotted; border-top-width: 2px; }
+.portfolio-chart-plot { padding: var(--space-sm) var(--space-sm) 0 var(--space-xs); }
+.portfolio-chart-note { margin: 0; padding: var(--space-xs) var(--space-md) var(--space-md); font-size: var(--text-xs); color: var(--color-text-secondary); }
+.portfolio-chart-note strong { color: var(--color-text-primary); }
+.portfolio-tooltip {
+  background: var(--color-surface-alt); border: 1px solid var(--color-border-strong); border-radius: var(--radius-sm);
+  padding: 8px 10px; font-size: var(--text-xs); color: var(--color-text-secondary); display: grid; gap: 4px;
+}
+.portfolio-tooltip-date { color: var(--color-text-primary); font-weight: var(--font-weight-medium); }
+.portfolio-tooltip-note { border-top: 1px solid var(--color-border); padding-top: 4px; margin-top: 2px; }

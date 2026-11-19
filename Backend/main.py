@@ -122,6 +122,10 @@ app.include_router(demo.router)
 import fomo
 app.include_router(fomo.router)
 
+# NEW: the dashboard's portfolio chart - value over time vs the S&P 500 (portfolio_history.py).
+import portfolio_history
+app.include_router(portfolio_history.router)
+
 # AI RATE LIMITING: every endpoint that can trigger a real Claude call
 # (sentiment, bull/bear, advisor chat) costs money per hit, so each user
 # gets a capped number of Claude calls per rolling window. Without this, a

@@ -30,6 +30,8 @@ PROTECTED_GET_ROUTES = [
     "/watchlist",
     "/holdings/news",
     "/notifications",
+    "/fomo/summary",
+    "/fomo/waits",
     "/chat/suggestions",
     "/auth/me",
 ]
@@ -138,7 +140,7 @@ def test_notifications_are_scoped(client, alice, bob, market_events):
     log_trade(client, alice, "AAPL", "buy", 5, 100)
     assert len(client.get("/notifications", headers=alice).json()["notifications"]) == 1
     bob_view = client.get("/notifications", headers=bob).json()
-    assert bob_view == {"unread_count": 0, "notifications": []}
+    assert bob_view == {"unread_count": 0, "notifications": [], "waits": []}
 
 
 def test_thesis_reviews_are_scoped(client, alice, bob):

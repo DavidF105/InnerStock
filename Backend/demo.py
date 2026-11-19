@@ -31,7 +31,7 @@ import grading
 import thesis
 from auth import create_access_token, hash_password
 from deps import get_db
-from models import (BrokerageAccount, ChatMessage, EarningsNotification, EmailToken, SnapTradeUser, Trade, User,
+from models import (BrokerageAccount, ChatMessage, EarningsNotification, EmailToken, FomoWait, SnapTradeUser, Trade, User,
                     UserProfile, Watchlist)
 
 router = APIRouter(prefix="/auth", tags=["demo"])
@@ -107,7 +107,7 @@ def delete_users(db: Session, user_ids: list):
     """Removes these users and everything that belongs to them."""
     if not user_ids:
         return
-    for model in (EarningsNotification, ChatMessage, Watchlist, EmailToken, UserProfile, Trade, BrokerageAccount, SnapTradeUser):
+    for model in (EarningsNotification, FomoWait, ChatMessage, Watchlist, EmailToken, UserProfile, Trade, BrokerageAccount, SnapTradeUser):
         db.query(model).filter(model.user_id.in_(user_ids)).delete(synchronize_session=False)
     db.query(User).filter(User.id.in_(user_ids)).delete(synchronize_session=False)
     db.commit()
@@ -137,7 +137,8 @@ FOMO_DEMO_WINDOW = (120, 200)
 FOMO_DEMO_TIME = time(9, 40)
 
 
-def _hottest_day(ticker: str, closes: list, today: date):
+def _hottest(ticker: str, closes: list, today: date, window=FOMO_DEMO_WINDOW):
+    """(day, close, check) for the highest warm/chasing score in the window, or None."""
     if not closes:
         return None
     start = closes[0][0]
@@ -146,13 +147,45 @@ def _hottest_day(ticker: str, closes: list, today: date):
     bench = grading.fetch_daily_closes(benchmark[0], start, today) if benchmark else []
     best = None
     for day, close in closes:
-        if not FOMO_DEMO_WINDOW[0] <= (today - day).days <= FOMO_DEMO_WINDOW[1]:
+        if not window[0] <= (today - day).days <= window[1]:
             continue
         result = fomo.score_buy(trade_date=day, trade_time=FOMO_DEMO_TIME, price=close, quantity=0,
                                 closes=closes, volumes=volumes, bench_closes=bench)
-        if result["band"] in ("warm", "chasing") and (not best or result["score"] > best[1]):
-            best = (day, result["score"])
+        if result["band"] in ("warm", "chasing") and (not best or result["score"] > best[2]["score"]):
+            best = (day, close, result)
+    return best
+
+
+def _hottest_day(ticker: str, closes: list, today: date):
+    best = _hottest(ticker, closes, today)
     return best[0] if best else None
+
+
+# NEW: one answered "Wait 3 days" so the demo shows how it works: the
+# hottest real day across the demo's stocks in the last few weeks (with 3
+# sessions after it), as if the demo investor waited instead of buying.
+# Skipped when no recent day was even warm.
+DEMO_WAIT_WINDOW = (7, 40)
+DEMO_WAIT_DOLLARS = 1500
+
+
+def _seed_wait(db: Session, user: User, histories: dict, today: date):
+    tickers = [t for t, closes in histories.items() if closes]
+    if not tickers:
+        return
+    with ThreadPoolExecutor(max_workers=len(tickers)) as pool:
+        found = list(pool.map(lambda t: (t, _hottest(t, histories[t], today, DEMO_WAIT_WINDOW)), tickers))
+    found = [(t, best) for t, best in found if best]
+    if not found:
+        return
+    ticker, (day, close, check) = max(found, key=lambda f: f[1][2]["score"])
+    db.add(FomoWait(
+        user_id=user.id, ticker=ticker, price=round(close, 2), quantity=round(DEMO_WAIT_DOLLARS / close, 4),
+        score=check["score"], band=check["band"], summary=check["summary"],
+        check_date=day, remind_on=fomo.add_sessions(day, fomo.WAIT_SESSIONS),
+    ))
+    db.commit()
+    fomo.resolve_waits(db, user, today)
 
 
 def seed(db: Session, user: User, today: date = None):
@@ -201,6 +234,12 @@ def seed(db: Session, user: User, today: date = None):
             # Graded shortly after its review date, not today.
             trade.graded_at = datetime.combine(min(trade.review_date + timedelta(days=2), today), time(18, 0))
     db.commit()
+
+    try:
+        _seed_wait(db, user, histories, today)
+    except Exception as e:  # a nice-to-have: never break the demo over it
+        db.rollback()
+        print(f"[demo] couldn't seed a wait: {e}")
 
 
 @router.post("/demo")

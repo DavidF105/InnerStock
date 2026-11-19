@@ -112,3 +112,21 @@ def test_demo_fomo_buy_lands_on_a_real_hot_day(client, history):
     assert hot - timedelta(days=7) <= date.fromisoformat(amd["trade_date"]) <= hot
     record = client.get("/fomo/summary", headers=headers).json()["record"]
     assert record["groups"]["chasing"]["count"] == 1 and record["self_tagged_caught"] == 1
+
+
+def test_demo_shows_an_answered_wait_on_a_real_recent_hot_day(client, history):
+    # The hottest recent day across the demo's stocks becomes a "Wait 3
+    # days" that's already answered, so the bell has something to show.
+    from test_fomo import sessions_ending, weekdays_after, with_runup
+    today = date.today()
+    hot = sessions_ending(today - timedelta(days=20), 1)[0]
+    top = with_runup(hot, 15, step=0.005, sessions=220)
+    history["NVDA"] = top + [(d, round(top[-1][1] * 0.97, 4)) for d in weekdays_after(hot, 30) if d <= today]
+    headers = start_demo(client)
+
+    notes = client.get("/notifications", headers=headers).json()
+    assert notes["unread_count"] >= 1
+    wait = notes["waits"][0]
+    assert wait["ticker"] == "NVDA" and wait["status"] == "answered"
+    assert hot - timedelta(days=7) <= date.fromisoformat(wait["check_date"]) <= hot  # a day of the run-up
+    assert wait["result_price"] and wait["saved"] is not None

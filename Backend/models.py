@@ -287,3 +287,27 @@ class EmailToken(Base):
     expires_at = Column(DateTime, nullable=False)
     used_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
+
+
+class FomoWait(Base):
+    __tablename__ = "fomo_waits"
+
+    # NEW: "Wait 3 days" (fomo.py). When the FOMO check says a buy looks
+    # like a chase, the user can wait instead of buying. This remembers the
+    # price at that moment; 3 trading days later the close is filled in
+    # (result_*) and the user is told whether waiting saved or cost money.
+    # Buys you DIDN'T make become part of your record this way.
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    ticker = Column(String, nullable=False)
+    price = Column(Float, nullable=False)           # price when the user chose to wait
+    quantity = Column(Float, nullable=True)         # shares they were about to buy (optional)
+    score = Column(Integer, nullable=True)          # the FOMO check at that moment
+    band = Column(String, nullable=True)
+    summary = Column(Text, nullable=True)
+    check_date = Column(Date, nullable=False)       # market (ET) date of the check
+    remind_on = Column(Date, nullable=False)        # 3 weekdays later: when the answer is expected
+    result_date = Column(Date, nullable=True)       # the session the answer comes from
+    result_price = Column(Float, nullable=True)     # its close (NULL = still waiting)
+    seen_at = Column(DateTime, nullable=True)       # answer seen on the notifications page
+    created_at = Column(DateTime, server_default=func.now())

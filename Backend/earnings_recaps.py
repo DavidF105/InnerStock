@@ -27,6 +27,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+import fomo
 import grading
 import holdings_news as hn
 from deps import get_current_user, get_db
@@ -423,7 +424,10 @@ def list_notifications(db: Session = Depends(get_db), current_user: User = Depen
     unread = db.query(EarningsNotification).filter(
         EarningsNotification.user_id == current_user.id, EarningsNotification.read_at.is_(None)
     ).count()
-    return {"unread_count": unread, "notifications": [serialize(n, r) for n, r in rows]}
+    # NEW: answered "Wait 3 days" checks (fomo.py) share the bell.
+    waits, unseen_waits = fomo.answered_waits_for_notifications(db, current_user)
+    return {"unread_count": unread + unseen_waits, "notifications": [serialize(n, r) for n, r in rows],
+            "waits": waits}
 
 
 @router.post("/notifications/read-all")
@@ -431,6 +435,7 @@ def mark_all_read(db: Session = Depends(get_db), current_user: User = Depends(ge
     db.query(EarningsNotification).filter(
         EarningsNotification.user_id == current_user.id, EarningsNotification.read_at.is_(None)
     ).update({EarningsNotification.read_at: datetime.utcnow()}, synchronize_session=False)
+    fomo.mark_waits_seen(db, current_user)
     db.commit()
     return {"success": True}
 

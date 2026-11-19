@@ -1,10 +1,12 @@
 import { useState, useEffect } from "react"
+import { IconHourglass } from "@tabler/icons-react"
 import { apiFetch } from "../api"
 
 // NEW: earnings recaps for stocks you hold. When a company reports, the
 // backend has Claude write what happened and what it means for the company
 // (Backend/earnings_recaps.py) and adds a notification here. Opening this
 // page marks them all as read, which clears the sidebar bell.
+// NEW: answered "Wait 3 days" checks (Backend/fomo.py) show here too.
 
 const SENTIMENT_PILL = { positive: "pill-success", neutral: "pill-muted", negative: "pill-danger" }
 
@@ -142,8 +144,42 @@ function RecapCard({ recap, focused, me }) {
   )
 }
 
+// NEW: the answer to a "Wait 3 days": the price when the user chose to
+// wait vs the close 3 trading days later.
+function WaitCard({ wait }) {
+  const cheaper = wait.change_pct < 0
+  const verdict = wait.change_pct === 0 ? "No difference"
+    : wait.saved != null ? `Waiting ${cheaper ? "saved" : "cost"} $${Math.abs(wait.saved).toLocaleString(undefined, { maximumFractionDigits: 0 })}`
+      : cheaper ? "Waiting paid off" : "Waiting cost you"
+  return (
+    <div className="card recap-card wait-card">
+      <div className="card-head">
+        <div className="recap-title">
+          {wait.unread && <span className="recap-new-dot" aria-label="New" />}
+          <IconHourglass size={16} />
+          <span className="recap-ticker">{wait.ticker}</span>
+          <span className="recap-company">Wait 3 days</span>
+        </div>
+        <div className="recap-meta">
+          <span className={`pill ${cheaper ? "pill-success" : wait.change_pct > 0 ? "pill-danger" : "pill-muted"}`}>{verdict}</span>
+        </div>
+      </div>
+      <div className="recap-body">
+        <p className="recap-text">{wait.message}</p>
+        <div className="recap-stats">
+          <Stat label="When you waited" value={`$${wait.price.toFixed(2)}`} detail={formatDay(wait.check_date)} />
+          <Stat label="3 trading days later" value={`$${wait.result_price.toFixed(2)}`} detail={formatDay(wait.result_date)} />
+          <Stat label="Change" value={formatPct(wait.change_pct)} toneValue={-wait.change_pct} />
+        </div>
+        {wait.summary && <div className="recap-footnote">The FOMO check at the time{wait.score != null ? ` (${wait.score}/100)` : ""}: {wait.summary}</div>}
+      </div>
+    </div>
+  )
+}
+
 function NotificationsPage({ focusId, me }) {
   const [recaps, setRecaps] = useState(null) // null = still loading
+  const [waits, setWaits] = useState([])
   const [error, setError] = useState(null)
 
   useEffect(() => {
@@ -154,6 +190,7 @@ function NotificationsPage({ focusId, me }) {
       })
       .then((data) => {
         setRecaps(data.notifications)
+        setWaits(data.waits || [])
         // Seen = read. The cards keep their "new" dot for this visit (it's
         // in the data we just loaded); the bell clears right away.
         if (data.unread_count > 0) {
@@ -177,7 +214,7 @@ function NotificationsPage({ focusId, me }) {
       <div className="topbar">
         <div>
           <h1>Notifications</h1>
-          <div className="sub">Earnings recaps for the stocks you hold</div>
+          <div className="sub">Earnings recaps for the stocks you hold, and your "Wait 3 days" answers</div>
         </div>
       </div>
       <div className="content recaps-content">
@@ -185,12 +222,13 @@ function NotificationsPage({ focusId, me }) {
         {!error && recaps === null && (
           <p style={{ color: "var(--color-text-secondary)" }}>Checking for new earnings reports…</p>
         )}
-        {recaps && recaps.length === 0 && (
+        {recaps && recaps.length === 0 && waits.length === 0 && (
           <p style={{ color: "var(--color-text-secondary)" }}>
             Nothing yet. When a company you hold reports earnings, a recap of what happened and what it
-            means for the company shows up here.
+            means for the company shows up here. So does the answer to any "Wait 3 days" you start.
           </p>
         )}
+        {waits.map((wait) => <WaitCard key={`wait-${wait.id}`} wait={wait} />)}
         {recaps && recaps.map((recap) => <RecapCard key={recap.id} recap={recap} focused={recap.id === focusId} me={me} />)}
       </div>
     </>

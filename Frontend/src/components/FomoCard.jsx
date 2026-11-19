@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react"
-import { IconBolt } from "@tabler/icons-react"
+import { IconBolt, IconHourglass } from "@tabler/icons-react"
 import { apiFetch } from "../api"
 import { FomoBadge } from "./FomoCheck"
 
@@ -9,7 +9,10 @@ import { FomoBadge } from "./FomoCheck"
 //   - the FOMO tax: what chasing buys cost vs just buying the S&P 500
 //   - the patience test: how often a chased stock was cheaper a week later
 //   - the detector vs what the user admitted ("Fear of missing out" tag)
-// Renders nothing until at least one buy has been checked.
+//   - NEW "If you'd waited": for each hot buy, buying when the stock next
+//     scored calm instead (the cool-off) - in dollars saved or cost
+//   - NEW "Your waits": the "Wait 3 days" checks, waiting or answered
+// Renders nothing until at least one buy has been checked (or a wait exists).
 
 const GROUPS = [
   { key: "chasing", label: "Chasing" },
@@ -26,19 +29,119 @@ function money(value) {
   return `${value < 0 ? "-" : "+"}$${Math.abs(value).toLocaleString(undefined, { maximumFractionDigits: 0 })}`
 }
 
+function shortDate(iso) {
+  const [y, m, d] = iso.split("-").map(Number)
+  return new Date(y, m - 1, d).toLocaleDateString(undefined, { month: "short", day: "numeric" })
+}
+
+function dollars(value) {
+  return `$${Math.abs(value).toLocaleString(undefined, { maximumFractionDigits: 0 })}`
+}
+
+// "saved $120" / "cost $85": positive = waiting would have been cheaper.
+function savedText(value) {
+  return value >= 0 ? `saved ${dollars(value)}` : `cost ${dollars(value)}`
+}
+
+function WaitingLedger({ waiting, ledger }) {
+  if (!waiting.checked) return null
+  return (
+    <div className="fomo-section">
+      <div className="fomo-section-head">
+        <h3>If you'd waited until it cooled off</h3>
+        <span className={`fomo-section-total ${waiting.saved >= 0 ? "positive" : "negative"}`}>
+          Waiting would have {savedText(waiting.saved)}
+        </span>
+      </div>
+      <p className="fomo-section-sub">
+        For each hot buy, the check was re-run on the following days. The first day the stock scored
+        calm is when it "cooled off" (about {waiting.avg_sessions} trading days later on average).
+        Buying then would have been cheaper {waiting.cheaper} of {waiting.checked} times.
+      </p>
+      <ul className="fomo-ledger">
+        {ledger.map((t) => {
+          const c = t.cool_off
+          return (
+            <li key={t.id}>
+              <FomoBadge band={t.self_tagged && t.band !== "chasing" ? "chasing" : t.band} score={t.score} />
+              <strong>{t.ticker}</strong>
+              <span className="brokerage-meta">{shortDate(t.trade_date)}</span>
+              <span className={`fomo-ledger-saved ${c.saved >= 0 ? "positive" : "negative"}`}>{savedText(c.saved)}</span>
+              <span className="fomo-recent-summary">
+                Paid ${t.price.toFixed(2)}.{" "}
+                {c.cooled
+                  ? `Cooled off ${c.sessions === 1 ? "the next day" : `${c.sessions} trading days later`} (${shortDate(c.date)}) at $${c.price.toFixed(2)}`
+                  : `Still hot two weeks later; on ${shortDate(c.date)} it was $${c.price.toFixed(2)}`}
+                {" "}({signed(c.change_pct)}%). Lowest along the way: ${c.low_price.toFixed(2)} on {shortDate(c.low_date)}.
+              </span>
+            </li>
+          )
+        })}
+      </ul>
+    </div>
+  )
+}
+
+function YourWaits({ waits, onCancel }) {
+  const { summary } = waits
+  return (
+    <div className="fomo-section">
+      <div className="fomo-section-head">
+        <h3><IconHourglass size={15} /> Your "Wait 3 days"</h3>
+        {summary.resolved > 0 && (
+          <span className="fomo-section-total">
+            Cheaper after waiting {summary.cheaper} of {summary.resolved} time{summary.resolved === 1 ? "" : "s"}
+            {summary.saved != null ? ` · ${savedText(summary.saved)}` : ""}
+          </span>
+        )}
+      </div>
+      {waits.waits.length === 0 ? (
+        <p className="fomo-section-sub">
+          When the check says a stock looks hot (on Search or when logging a buy), press
+          "Wait 3 days instead". Three trading days later you'll see whether waiting paid off.
+        </p>
+      ) : (
+        <ul className="fomo-ledger">
+          {waits.waits.map((w) => (
+            <li key={w.id}>
+              <span className={`pill ${w.status === "waiting" ? "pill-muted" : w.change_pct < 0 ? "pill-success" : "pill-danger"}`}>
+                {w.status === "waiting" ? "Waiting" : w.change_pct < 0 ? "Waiting paid off" : "Cost you"}
+              </span>
+              <strong>{w.ticker}</strong>
+              <span className="brokerage-meta">{shortDate(w.check_date)}</span>
+              {w.status === "waiting" && (
+                <button type="button" className="fomo-link" onClick={() => onCancel(w.id)}>Cancel</button>
+              )}
+              <span className="fomo-recent-summary">{w.message}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}
+
 function FomoCard({ refreshKey }) {
   const [summary, setSummary] = useState(null)
+
+  const [reloads, setReloads] = useState(0)
 
   useEffect(() => {
     apiFetch("/fomo/summary")
       .then((response) => (response.ok ? response.json() : null))
       .then(setSummary)
       .catch(() => setSummary(null))
-  }, [refreshKey])
+  }, [refreshKey, reloads])
+
+  function cancelWait(id) {
+    apiFetch(`/fomo/waits/${id}`, { method: "DELETE" })
+      .then(() => setReloads((n) => n + 1))
+      .catch(() => {})
+  }
 
   if (!summary) return null
   const { record } = summary
-  if (!record.scored_buys && !record.self_tagged) return null
+  if (!record.scored_buys && !record.self_tagged && !summary.waits.waits.length) return null
 
   const taxTone = record.fomo_tax == null ? "" : record.fomo_tax < 0 ? " negative" : " positive"
   return (
@@ -98,6 +201,9 @@ function FomoCard({ refreshKey }) {
           </p>
         )}
       </div>
+
+      <WaitingLedger waiting={record.waiting} ledger={summary.waiting_ledger} />
+      <YourWaits waits={summary.waits} onCancel={cancelWait} />
 
       {summary.recent_chasing.length > 0 && (
         <ul className="fomo-recent">

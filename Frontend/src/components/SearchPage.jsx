@@ -3,7 +3,7 @@ import { IconSearch } from "@tabler/icons-react"
 import { searchTickers } from "../tickers"
 import { apiFetch } from "../api"
 import StockChart from "./StockChart"
-import FomoCheck from "./FomoCheck"
+import FomoCheck, { WaitButton } from "./FomoCheck"
 
 function SearchPage() {
   const [query, setQuery] = useState("")
@@ -182,7 +182,12 @@ function SearchPage() {
             </button>
           </form>
           {fomoStatus && fomoStatus !== "checking" && <p className="fomo-quiet">{fomoStatus}</p>}
-          <FomoCheck result={fomoResult} title={`Buying ${info.ticker} now`} />
+          <FomoCheck result={fomoResult} title={`Buying ${info.ticker} now`}>
+            {fomoResult && (fomoResult.band === "chasing" || fomoResult.band === "warm") && (
+              <WaitButton key={`${fomoResult.ticker}-${fomoResult.price}`} ticker={fomoResult.ticker}
+                quantity={fomoResult.quantity} />
+            )}
+          </FomoCheck>
         </div>
       )}
 

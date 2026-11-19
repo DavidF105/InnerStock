@@ -1576,3 +1576,4 @@ input, select, textarea, button {
 .fomo-link { margin-left: auto; background: none; border: none; padding: 0; color: var(--color-text-secondary); font-size: var(--text-xs); text-decoration: underline; cursor: pointer; }
 .fomo-section:last-of-type { padding-bottom: var(--space-sm); }
 .wait-card .recap-title svg { color: var(--color-text-secondary); }
+.fomo-card-pending { padding-top: var(--space-md); }

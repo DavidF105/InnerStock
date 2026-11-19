@@ -412,3 +412,32 @@ def test_wait_needs_a_stock_with_history(client, alice):
 def test_add_sessions_skips_weekends():
     friday = date(2026, 11, 13)
     assert fomo.add_sessions(friday, 3) == date(2026, 11, 18)
+
+
+def test_a_failed_price_download_is_retried_not_stored_as_unknown(client, alice, history):
+    # No prices at all (Yahoo refusing the download) -> left unchecked.
+    trade = log_trade(client, alice, "NVDA", "buy", 10, 100.0, trade_date=DAY)
+    assert trade["fomo_band"] is None
+    summary = client.get("/fomo/summary", headers=alice).json()
+    assert summary["record"]["buys"] == 1 and summary["record"]["unchecked"] == 1
+
+    # Prices come back: the very next request scores it.
+    history["NVDA"] = with_runup(DAY, 12, step=0.005)
+    record = client.get("/fomo/summary", headers=alice).json()["record"]
+    assert record["scored_buys"] == 1 and record["unchecked"] == 0
+
+
+def test_too_little_history_is_stored_as_unknown(client, alice, history):
+    history["NEWCO"] = wiggle(sessions_ending(DAY, 10))
+    trade = log_trade(client, alice, "NEWCO", "buy", 10, history["NEWCO"][-1][1], trade_date=DAY)
+    assert trade["fomo_band"] == "unknown"
+
+
+def test_a_tiny_move_after_waiting_is_no_real_difference():
+    from models import FomoWait
+    w = FomoWait(ticker="COST", price=1065.59, quantity=1.4, check_date=date(2026, 11, 5),
+                 remind_on=date(2026, 11, 10), result_date=date(2026, 11, 10), result_price=1066.14)
+    assert fomo.serialize_wait(w)["verdict"] == "same"
+    assert "no real difference" in fomo.wait_message(w)
+    w.result_price = 1000.0
+    assert fomo.serialize_wait(w)["verdict"] == "paid_off" and "waiting saved you" in fomo.wait_message(w)

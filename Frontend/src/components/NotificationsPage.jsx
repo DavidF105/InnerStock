@@ -147,10 +147,12 @@ function RecapCard({ recap, focused, me }) {
 // NEW: the answer to a "Wait 3 days": the price when the user chose to
 // wait vs the close 3 trading days later.
 function WaitCard({ wait }) {
-  const cheaper = wait.change_pct < 0
-  const verdict = wait.change_pct === 0 ? "No difference"
-    : wait.saved != null ? `Waiting ${cheaper ? "saved" : "cost"} $${Math.abs(wait.saved).toLocaleString(undefined, { maximumFractionDigits: 0 })}`
-      : cheaper ? "Waiting paid off" : "Waiting cost you"
+  // verdict: paid_off / cost / same (moves under 1% count as "same")
+  const amount = wait.saved != null ? ` $${Math.abs(wait.saved).toLocaleString(undefined, { maximumFractionDigits: 0 })}` : ""
+  const verdict = wait.verdict === "same" ? "No real difference"
+    : wait.verdict === "paid_off" ? (amount ? `Waiting saved${amount}` : "Waiting paid off")
+      : (amount ? `Waiting cost${amount}` : "Waiting cost you")
+  const pill = wait.verdict === "paid_off" ? "pill-success" : wait.verdict === "cost" ? "pill-danger" : "pill-muted"
   return (
     <div className="card recap-card wait-card">
       <div className="card-head">
@@ -161,7 +163,7 @@ function WaitCard({ wait }) {
           <span className="recap-company">Wait 3 days</span>
         </div>
         <div className="recap-meta">
-          <span className={`pill ${cheaper ? "pill-success" : wait.change_pct > 0 ? "pill-danger" : "pill-muted"}`}>{verdict}</span>
+          <span className={`pill ${pill}`}>{verdict}</span>
         </div>
       </div>
       <div className="recap-body">

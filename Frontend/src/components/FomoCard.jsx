@@ -104,8 +104,8 @@ function YourWaits({ waits, onCancel }) {
         <ul className="fomo-ledger">
           {waits.waits.map((w) => (
             <li key={w.id}>
-              <span className={`pill ${w.status === "waiting" ? "pill-muted" : w.change_pct < 0 ? "pill-success" : "pill-danger"}`}>
-                {w.status === "waiting" ? "Waiting" : w.change_pct < 0 ? "Waiting paid off" : "Cost you"}
+              <span className={`pill ${w.verdict === "paid_off" ? "pill-success" : w.verdict === "cost" ? "pill-danger" : "pill-muted"}`}>
+                {w.status === "waiting" ? "Waiting" : w.verdict === "paid_off" ? "Waiting paid off" : w.verdict === "cost" ? "Cost you" : "No real difference"}
               </span>
               <strong>{w.ticker}</strong>
               <span className="brokerage-meta">{shortDate(w.check_date)}</span>
@@ -141,7 +141,29 @@ function FomoCard({ refreshKey }) {
 
   if (!summary) return null
   const { record } = summary
-  if (!record.scored_buys && !record.self_tagged && !summary.waits.waits.length) return null
+  const hasWaits = summary.waits.waits.length > 0
+  if (!record.buys && !hasWaits) return null
+
+  // Buys exist but none could be checked yet (usually Yahoo refusing the
+  // price download for a while): say so instead of quietly hiding the card.
+  if (!record.scored_buys && !record.self_tagged) {
+    return (
+      <div className="card fomo-card">
+        <div className="card-head">
+          <h2><IconBolt size={16} /> How you buy</h2>
+        </div>
+        {record.buys > 0 && (
+          <div className="fomo-card-notes fomo-card-pending">
+            <p>
+              None of your {record.buys} buy{record.buys === 1 ? "" : "s"} could be checked yet - the price data
+              didn't load. It tries again automatically; check back in a few minutes.
+            </p>
+          </div>
+        )}
+        <YourWaits waits={summary.waits} onCancel={cancelWait} />
+      </div>
+    )
+  }
 
   const taxTone = record.fomo_tax == null ? "" : record.fomo_tax < 0 ? " negative" : " positive"
   return (
@@ -189,6 +211,9 @@ function FomoCard({ refreshKey }) {
 
       <div className="fomo-card-notes">
         <p>{summary.message}</p>
+        {record.unchecked > 0 && (
+          <p>{record.unchecked} more buy{record.unchecked === 1 ? " is" : "s are"} still waiting for price data - it retries automatically.</p>
+        )}
         {record.self_tagged > 0 && (
           <p>You admitted FOMO on {record.self_tagged} buy{record.self_tagged === 1 ? "" : "s"}; the check flagged {record.self_tagged_caught} of them.</p>
         )}

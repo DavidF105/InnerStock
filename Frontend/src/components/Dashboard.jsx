@@ -129,9 +129,13 @@ function Dashboard({ refreshKey, onNavigate, inboxCount = 0, onBrokerageSynced }
     body = <p style={{ color: "var(--color-danger)" }}>Failed to load dashboard: {error}</p>
   } else if (!data || data.holdings.length === 0) {
     body = (
-      <p style={{ color: "var(--color-text-secondary)" }}>
-        No holdings yet — log a trade or sync your brokerage to get started.
-      </p>
+      <>
+        <p style={{ color: "var(--color-text-secondary)" }}>
+          No holdings yet — log a trade or sync your brokerage to get started.
+        </p>
+        {/* Sold everything? Your buys still have a FOMO record. */}
+        <FomoCard refreshKey={`${refreshKey}-${syncKey}`} />
+      </>
     )
   } else {
     body = (

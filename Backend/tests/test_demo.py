@@ -1,6 +1,8 @@
 # "Try the demo" (demo.py): private throwaway accounts with sample data.
 from datetime import date, datetime, timedelta
 
+import pytest
+
 import demo
 from models import Trade, User
 
@@ -19,16 +21,18 @@ def test_demo_logs_into_a_ready_made_journal(client):
     # Profile done, so no survey; holdings, inbox and watchlist all populated.
     assert client.get("/profile", headers=headers).status_code == 200
     held = {h["ticker"] for h in client.get("/holdings", headers=headers).json()["holdings"]}
-    assert {"XEQT.TO", "AAPL", "NVDA", "SHOP.TO"} <= held
-    assert client.get("/trades/needs-thesis/count", headers=headers).json() == {"count": 3}
-    assert len(client.get("/watchlist", headers=headers).json()["watchlist"]) == 3
+    assert {"XEQT.TO", "AAPL", "NVDA", "SHOP.TO", "RY.TO", "MSFT", "ENB.TO", "GOOG.TO", "AMZN"} <= held
+    assert "TSLA" not in held  # bought and fully sold: a closed position
+    assert client.get("/trades/needs-thesis/count", headers=headers).json() == {"count": 4}
+    assert len(client.get("/watchlist", headers=headers).json()["watchlist"]) == len(demo.DEMO_WATCHLIST)
+    assert len(client.get("/trades", headers=headers).json()) >= 25
 
 
 def test_demo_uses_real_prices_and_grades(client, history):
     # Real closes for every ticker on every day: trades are priced at that
     # day's close and "the user" has graded the ones they were meant to.
     today = date.today()
-    for ticker in {t[1] for t in demo.DEMO_TRADES} | {"SPY", "VFV.TO"}:
+    for ticker in {t["ticker"] for t in demo.DEMO_TRADES} | {"SPY", "VFV.TO"}:
         history[ticker] = [(today - timedelta(days=d), 100 + (400 - d) * 0.1) for d in range(400, -1, -1)]
     headers = start_demo(client)
 
@@ -127,6 +131,58 @@ def test_demo_shows_an_answered_wait_on_a_real_recent_hot_day(client, history):
     notes = client.get("/notifications", headers=headers).json()
     assert notes["unread_count"] >= 1
     wait = notes["waits"][0]
-    assert wait["ticker"] == "NVDA" and wait["status"] == "answered"
-    assert hot - timedelta(days=7) <= date.fromisoformat(wait["check_date"]) <= hot  # a day of the run-up
-    assert wait["result_price"] and wait["saved"] is not None
+    # The run-up's last day is the one where waiting paid off (-3% three
+    # sessions later); earlier run-up days kept climbing, so they lose.
+    assert wait["ticker"] == "NVDA" and wait["check_date"] == hot.isoformat()
+    assert wait["verdict"] == "paid_off" and wait["change_pct"] == pytest.approx(-3, abs=0.1) and wait["saved"] > 0
+
+
+def test_demo_wait_prefers_a_real_difference():
+    import demo
+    check = lambda score: {"score": score}
+    tiny = ("COST", date(2026, 11, 5), 100, check(65), 0.1)
+    up = ("AAPL", date(2026, 11, 3), 100, check(50), 3.5)
+    down = ("AMD", date(2026, 9, 24), 100, check(35), -3.4)
+    assert demo._pick_demo_wait([tiny, up, down]) == down    # waiting paid off beats a hotter day
+    assert demo._pick_demo_wait([tiny, up]) == up            # a real move beats a non-event
+    assert demo._pick_demo_wait([tiny]) == tiny              # last resort: the hottest day
+    assert demo._pick_demo_wait([]) is None
+
+
+def test_demo_covers_every_grading_path_and_reason_stat(client, history):
+    today = date.today()
+    for ticker in {t["ticker"] for t in demo.DEMO_TRADES} | {"SPY", "VFV.TO"}:
+        history[ticker] = [(today - timedelta(days=d), 100 + (400 - d) * 0.1) for d in range(400, -1, -1)]
+    headers = start_demo(client)
+
+    # Graded against the numbers, with the note it required.
+    trades = client.get("/trades", headers=headers).json()
+    tsla_buy = next(t for t in trades if t["ticker"] == "TSLA" and t["action"] == "buy")
+    assert tsla_buy["review_notes"] in demo.DISAGREE_NOTES.values()
+
+    # Due for review: auto-grading runs, but sells the prices can't judge
+    # (rebalancing, needing cash) are left for the visitor.
+    due = client.get("/thesis-reviews", headers=headers).json()
+    due = due["reviews"] if isinstance(due, dict) else due
+    left = {(r["ticker"], r["action"]) for r in due}
+    assert {("ENB.TO", "sell"), ("RY.TO", "sell")} <= left
+    recent = client.get("/thesis-reviews/recent", headers=headers).json()["reviews"]
+    assert any(r["auto_graded"] for r in recent) and any(not r["auto_graded"] for r in recent)
+
+    summary = client.get("/trades/reasons-summary", headers=headers).json()
+    assert summary["dont_remember_count"] == 1
+    assert summary["hindsight_count"] == 1          # AMZN's reason, written 25 days later
+    assert summary["graded_against_numbers"] == 1   # the TSLA buy
+
+
+def test_demo_adds_a_holding_that_just_reported_earnings(client, history, market_events, recap_writer):
+    from test_earnings_recaps import reported
+    today = date.today()
+    reported(market_events, "HD", "The Home Depot, Inc.", days_ago=2)
+    history["HD"] = [(today - timedelta(days=d), 380.0) for d in range(200, -1, -1)]
+    headers = start_demo(client)
+
+    hd = [t for t in client.get("/trades", headers=headers).json() if t["ticker"] == "HD"]
+    assert len(hd) == 1 and hd[0]["action"] == "buy" and "Home Depot" in hd[0]["thesis_text"]
+    notes = client.get("/notifications", headers=headers).json()["notifications"]
+    assert [n["ticker"] for n in notes] == ["HD"]

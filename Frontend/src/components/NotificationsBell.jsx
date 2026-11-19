@@ -3,7 +3,7 @@ import { IconBell } from "@tabler/icons-react"
 import { apiFetch } from "../api"
 
 // NEW: bell next to the brand name, with a count of unread earnings
-// recaps. Loading GET /notifications is also what makes the backend write
+// recaps and answered "Wait 3 days" checks. Loading GET /notifications is also what makes the backend write
 // recaps for any holdings that just reported (Backend/earnings_recaps.py),
 // so this poll is how new recaps appear without opening a page.
 // Earnings come out a few times a day at most - 30 minutes is plenty.
@@ -45,8 +45,8 @@ function NotificationsBell({ active, onClick }) {
     <button
       className={`notifications-bell${active ? " active" : ""}`}
       onClick={onClick}
-      aria-label={unread > 0 ? `${unread} new earnings recap${unread === 1 ? "" : "s"}` : "Notifications"}
-      title="Earnings recaps"
+      aria-label={unread > 0 ? `${unread} new notification${unread === 1 ? "" : "s"}` : "Notifications"}
+      title="Notifications"
     >
       <IconBell size={17} />
       {unread > 0 && <span className="notifications-bell-count">{unread > 9 ? "9+" : unread}</span>}

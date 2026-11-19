@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react"
 import { apiFetch } from "../api"
 import ReasonChips from "./ReasonChips"
-import FomoCheck from "./FomoCheck"
+import FomoCheck, { WaitButton } from "./FomoCheck"
 
 // NEW: how long the form waits after the last keystroke before re-running
 // the live FOMO check, so typing a ticker doesn't fire one per letter.
@@ -80,6 +80,9 @@ function TradeForm({ onTradeLogged }) {
     return () => clearTimeout(timer)
   }, [form.action, form.ticker, form.trade_date, form.trade_time, form.price_per_share, form.quantity])
   const looksLikeAChase = fomoCheck && (fomoCheck.band === "chasing" || fomoCheck.band === "warm")
+  // "Wait 3 days instead" only makes sense for a buy that hasn't happened
+  // yet - i.e. one dated today, not an older trade being logged.
+  const isToday = form.trade_date === new Date().toLocaleDateString("en-CA")
 
   function handleChange(e) {
     const { name, value } = e.target
@@ -351,6 +354,10 @@ function TradeForm({ onTradeLogged }) {
               Yes, add "Fear of missing out"
             </button>
           </div>
+        )}
+        {looksLikeAChase && isToday && (
+          <WaitButton key={`${form.ticker}-${form.price_per_share}`} ticker={form.ticker.trim()}
+            price={Number(form.price_per_share)} quantity={Number(form.quantity) > 0 ? Number(form.quantity) : null} />
         )}
       </FomoCheck>
 

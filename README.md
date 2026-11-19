@@ -15,7 +15,7 @@ Most brokerage apps show you *what* you own. InnerStock asks *why* you bought it
 | **Portfolio tracking** | Holdings, average cost, and total and daily gain/loss from live prices. Supports US and Canadian (TSX `.TO`) listings. |
 | **Trade reasons** | Every trade needs a *why*: a written reason, a confidence score (1–10) and a review date. Trades synced from your brokerage show up in an inbox so you can add their reasons. |
 | **Automatic grading** | On the review date, the trade's return is compared with the S&P 500's over the same days. Trades the numbers can judge are graded for you. The rest come back to you with a scorecard. |
-| **FOMO check** | Every buy gets a 0–100 "chasing" score from the stock's recent move, its trading volume and your own habits. The app tracks your **FOMO tax**: what chasing buys have cost you compared with buying the S&P 500 instead. ([How it works](#the-fomo-check)) |
+| **FOMO check** | Every buy gets a 0–100 "chasing" score from the stock's recent move, its trading volume and your own habits. The app tracks your **FOMO tax** (what chasing buys have cost you compared with the S&P 500), what waiting until it cooled off would have done, and lets you **wait 3 days** instead of buying. ([How it works](#the-fomo-check)) |
 | **AI advisor** | A chat advisor (Claude) that knows your holdings, your trade reasons and your track record. Before it answers, it can look up prices, news and earnings, simulate a trade, or run a FOMO check. |
 | **Earnings & news** | Upcoming earnings dates and the most relevant news for each stock you own. After a company reports, you get an in-app recap of what happened and what it means, which you can email to yourself. |
 | **Brokerage sync** | Imports Wealthsimple trades through SnapTrade. Re-syncing never creates duplicates and keeps the reasons you've written. |
@@ -59,6 +59,10 @@ The app then checks each band against what actually happened:
 - **Patience test:** how often a chased stock was cheaper a week later.
 - **Your own labels:** how many of the buys you tagged "fear of missing out" the detector also caught.
 - **Expected cost of your next chase:** your own average, pulled toward the average of other users until you have enough trades of your own.
+
+And it answers the question every chase raises: **what if I had waited?**
+- **If you'd waited until it cooled off:** for every hot buy, the check is re-run on each of the next 10 trading days. The first day the stock scores calm is when it "cooled off", and the app shows what buying then would have saved or cost, in dollars.
+- **Wait 3 days instead:** when the check flags a buy you haven't made yet, you can wait instead. The app saves the price, and 3 trading days later a notification tells you whether waiting paid off. Buys you *didn't* make become part of your record too.
 
 The code is in [`Backend/fomo.py`](Backend/fomo.py) and the tests are in [`Backend/tests/test_fomo.py`](Backend/tests/test_fomo.py).
 

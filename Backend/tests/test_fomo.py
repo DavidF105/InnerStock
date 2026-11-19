@@ -272,3 +272,143 @@ def test_inbox_shows_the_check_for_synced_buys(client, alice, history, db_sessio
     row = client.get("/trades/needs-thesis", headers=alice).json()["trades"][0]
     assert row["fomo"]["band"] == "chasing"
     assert any(s["key"] == "opening" for s in row["fomo"]["signals"])
+
+
+# --- NEW: cool-off ("what would waiting have done?") ----------------------------------
+
+def test_cool_off_buys_at_the_first_session_that_scores_calm():
+    closes = with_runup(DAY, 12, step=0.005)
+    entry = closes[-1][1]
+    # Afterwards it drifts sideways a little below the buy.
+    closes += wiggle(weekdays_after(DAY, 12), start=entry * 0.97, step=0.005)
+    cool = fomo.cool_off(closes, {}, [], DAY, entry)
+    assert cool["cooled"] and 1 <= cool["sessions"] <= fomo.COOL_OFF_SESSIONS
+    cooled_day = date.fromisoformat(cool["date"])
+    assert cool["price"] == pytest.approx(dict(closes)[cooled_day], abs=1e-3)
+    assert cool["change_pct"] < 0
+    # It really is the FIRST calm session: every session before it was still hot.
+    for d in weekdays_after(DAY, cool["sessions"] - 1):
+        assert fomo.score_buy(trade_date=d, trade_time=None, price=None, quantity=None,
+                              closes=closes, volumes={}, bench_closes=[])["band"] in fomo.HOT_BANDS
+    assert cool["low_price"] <= cool["price"]
+
+
+def test_cool_off_uses_the_tenth_session_if_it_never_calms_down():
+    closes = with_runup(DAY, 12, step=0.005)
+    entry, price = closes[-1][1], closes[-1][1]
+    for d in weekdays_after(DAY, 12):  # +3% a day, every day
+        price *= 1.03
+        closes.append((d, round(price, 4)))
+    cool = fomo.cool_off(closes, {}, [], DAY, entry)
+    assert not cool["cooled"] and cool["sessions"] == fomo.COOL_OFF_SESSIONS
+    assert cool["date"] == weekdays_after(DAY, 10)[-1].isoformat()
+    assert cool["change_pct"] > 0  # waiting would have cost money
+
+
+def test_cool_off_waits_for_ten_sessions_of_data():
+    closes = with_runup(DAY, 12, step=0.005) + wiggle(weekdays_after(DAY, 9))
+    assert fomo.cool_off(closes, {}, [], DAY, closes[69][1]) is None
+
+
+OLD_DAY = sessions_ending(date.today() - timedelta(days=30), 1)[0]
+
+
+def hot_then_cheaper(day):
+    closes = with_runup(day, 12, step=0.005)
+    entry = closes[-1][1]
+    return closes + wiggle(weekdays_after(day, 14), start=entry * 0.95, step=0.005), entry
+
+
+def test_hot_buys_get_the_cool_off_and_it_counts_in_the_record(client, alice, history):
+    history["NVDA"], entry = hot_then_cheaper(OLD_DAY)
+    history["KO"] = wiggle(sessions_ending(OLD_DAY, 70)) + wiggle(weekdays_after(OLD_DAY, 14))
+    log_trade(client, alice, "NVDA", "buy", 10, entry, trade_date=OLD_DAY)
+    log_trade(client, alice, "KO", "buy", 10, dict(history["KO"])[OLD_DAY], trade_date=OLD_DAY)
+
+    body = client.get("/fomo/summary", headers=alice).json()
+    waiting = body["record"]["waiting"]
+    assert waiting["checked"] == 1  # the calm KO buy isn't counted
+    ledger = body["waiting_ledger"]
+    assert [row["ticker"] for row in ledger] == ["NVDA"]
+    cool = ledger[0]["cool_off"]
+    assert cool["change_pct"] < 0 and cool["saved"] > 0
+    assert waiting["saved"] == pytest.approx(-10 * entry * cool["change_pct"] / 100, abs=0.01)
+    assert "cooled off would have saved" in body["message"]
+
+
+def test_older_checks_get_the_cool_off_filled_in(client, alice, history, db_session_factory):
+    import json
+    from datetime import datetime
+    history["NVDA"], entry = hot_then_cheaper(OLD_DAY)
+    log_trade(client, alice, "NVDA", "buy", 10, entry, trade_date=OLD_DAY)
+
+    # As if it was checked before the cool-off existed, two days ago.
+    db = db_session_factory()
+    trade = db.query(Trade).one()
+    blob = json.loads(trade.fomo_signals)
+    blob.pop("cool_off")
+    trade.fomo_signals = json.dumps(blob)
+    trade.fomo_checked_at = datetime.utcnow() - timedelta(days=2)
+    db.commit()
+    db.close()
+
+    assert client.get("/fomo/summary", headers=alice).json()["record"]["waiting"]["checked"] == 1
+
+
+# --- NEW: "Wait 3 days" ------------------------------------------------------------------
+
+def test_wait_instead_of_buying_then_get_the_answer(client, alice, bob, history, db_session_factory):
+    from models import FomoWait
+    today = date.today()
+    history["NVDA"] = with_runup(today, 12, step=0.005)
+
+    created = client.post("/fomo/waits", headers=alice, json={"ticker": "nvda", "dollars": 1000})
+    assert created.status_code == 201, created.text
+    wait = created.json()
+    assert wait["ticker"] == "NVDA" and wait["status"] == "waiting" and wait["band"] in fomo.HOT_BANDS
+    assert wait["quantity"] == pytest.approx(1000 / wait["price"], rel=1e-3)
+    assert wait["remind_on"] == fomo.add_sessions(date.fromisoformat(wait["check_date"]), 3).isoformat()
+    assert "Waiting on NVDA" in wait["message"]
+    # One open wait per stock.
+    assert client.post("/fomo/waits", headers=alice, json={"ticker": "NVDA"}).status_code == 409
+    # Nothing to announce yet.
+    notes = client.get("/notifications", headers=alice).json()
+    assert notes["waits"] == [] and notes["unread_count"] == 0
+
+    # Time passes: pretend the check was made 8 sessions ago.
+    checked = sessions_ending(today, 9)[0]
+    answer_day, answer_close = [c for c in history["NVDA"] if c[0] > checked][2]
+    db = db_session_factory()
+    row = db.query(FomoWait).one()
+    row.check_date, row.remind_on = checked, fomo.add_sessions(checked, 3)
+    db.commit()
+    db.close()
+
+    notes = client.get("/notifications", headers=alice).json()
+    assert notes["unread_count"] == 1
+    answered = notes["waits"][0]
+    assert answered["status"] == "answered" and answered["unread"]
+    assert answered["result_date"] == answer_day.isoformat()
+    assert answered["result_price"] == pytest.approx(answer_close, abs=1e-3)
+    assert answered["change_pct"] == pytest.approx((answer_close - wait["price"]) / wait["price"] * 100, abs=0.01)
+    assert answered["message"].startswith("You almost bought NVDA")
+
+    client.post("/notifications/read-all", headers=alice)
+    assert client.get("/notifications", headers=alice).json()["unread_count"] == 0
+    assert client.get("/fomo/summary", headers=alice).json()["record"]["waits"]["resolved"] == 1
+
+    # Bob can't see or remove Alice's wait.
+    assert client.get("/fomo/waits", headers=bob).json()["waits"] == []
+    assert client.delete(f"/fomo/waits/{wait['id']}", headers=bob).status_code == 404
+    assert client.delete(f"/fomo/waits/{wait['id']}", headers=alice).status_code == 200
+    assert client.get("/fomo/waits", headers=alice).json()["waits"] == []
+
+
+def test_wait_needs_a_stock_with_history(client, alice):
+    assert client.post("/fomo/waits", headers=alice, json={"ticker": "NOPE"}).status_code == 404
+    assert client.post("/fomo/waits", json={"ticker": "NVDA"}).status_code == 401
+
+
+def test_add_sessions_skips_weekends():
+    friday = date(2026, 11, 13)
+    assert fomo.add_sessions(friday, 3) == date(2026, 11, 18)

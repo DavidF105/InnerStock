@@ -41,6 +41,16 @@
 #     blended with everyone else's (expected_excess_pct), so one lucky trade
 #     can't make chasing look smart. Their own record takes over as it grows.
 #
+# NEW - "what would waiting have done?", two ways:
+#   - cool-off (past buys): for every chasing/warm buy, the market half of
+#     the check is re-run on each of the next 10 sessions. The first one
+#     that scores calm is "when it cooled off"; buying at that close instead
+#     is what waiting would have cost or saved, in dollars (cool_off()).
+#   - "Wait 3 days" (future buys): when the check flags a buy before it's
+#     made, the user can wait instead. The price is saved (FomoWait) and 3
+#     sessions later the close is filled in and shown as a notification:
+#     "waiting saved $14 a share". Buys the user DIDN'T make become data.
+#
 # Scores are stored on the trade (Trade.fomo_*), worked out lazily by
 # ensure_scored() the first time something needs them.
 import json
@@ -60,7 +70,7 @@ from sqlalchemy.orm import Session
 import grading
 import thesis
 from deps import get_current_user, get_db
-from models import Trade, User, Watchlist
+from models import FomoWait, Trade, User, Watchlist
 
 router = APIRouter(tags=["fomo"])
 
@@ -100,6 +110,18 @@ WARM_SCORE = 30
 # many calendar days have passed (a week of sessions plus a weekend/holiday).
 WEEK_SESSIONS = 5
 WEEK_LATER_DAYS = 9
+
+# Cool-off: how long to look for the stock calming down after a hot buy,
+# and when to look (10 sessions = two weeks, plus room for holidays).
+COOL_OFF_SESSIONS = 10
+COOL_OFF_DAYS = 16
+HOT_BANDS = ("chasing", "warm")
+
+# "Wait 3 days": the answer is the close this many sessions after the check.
+WAIT_SESSIONS = 3
+MAX_OPEN_WAITS = 20
+MAX_RESOLVE_PER_REQUEST = 10
+WAITS_LISTED = 30
 
 RESCORE_UNKNOWN_AFTER = timedelta(days=1)  # retry "not enough history" daily
 MAX_SCORE_PER_REQUEST = 30
@@ -274,6 +296,47 @@ def week_later_pct(closes, trade_date, entry):
     return round(_pct(entry, after[WEEK_SESSIONS - 1][1]), 2)
 
 
+def cool_off(closes, volumes, bench_closes, trade_date, entry):
+    """What waiting would have done for a hot buy: re-runs the market half
+    of the check on each of the next 10 sessions (as if buying at that
+    day's close). The first one that comes out calm (or a dip) is when the
+    stock "cooled off"; if none does, the 10th session is used.
+
+    change_pct < 0 means buying then would have been cheaper. None until 10
+    sessions after the buy exist."""
+    after = [c for c in closes if c[0] > trade_date]
+    if len(after) < COOL_OFF_SESSIONS or not entry:
+        return None
+    window = after[:COOL_OFF_SESSIONS]
+    cooled = None
+    for n, (day, _) in enumerate(window, start=1):
+        result = score_buy(trade_date=day, trade_time=None, price=None, quantity=None,
+                           closes=closes, volumes=volumes, bench_closes=bench_closes)
+        if result["band"] in ("calm", "dip"):
+            cooled = (n, day)
+            break
+    sessions, day = cooled or (COOL_OFF_SESSIONS, window[-1][0])
+    price = dict(window)[day]
+    low_day, low = min(window, key=lambda c: c[1])
+    return {
+        "cooled": cooled is not None,
+        "sessions": sessions,
+        "date": day.isoformat(),
+        "price": round(price, 4),
+        "change_pct": round(_pct(entry, price), 2),
+        "low_date": low_day.isoformat(),
+        "low_price": round(low, 4),
+        "low_pct": round(_pct(entry, low), 2),
+    }
+
+
+def waiting_saved(trade: Trade, cool: dict):
+    """Dollars buying at the cool-off price would have saved (negative =
+    waiting would have cost). Measured in %, so a later split doesn't matter."""
+    value = float(trade.quantity) * float(trade.price_per_share)
+    return round(-value * cool["change_pct"] / 100, 2)
+
+
 # --- The user's habits -----------------------------------------------------------------
 
 def habits_for(ticker, trade_date, trade_id, trades, watchlist) -> Habits:
@@ -305,7 +368,7 @@ def market_data(ticker, trade_date, today):
     """(closes, volumes, bench_closes) around a trade. One cached download
     per ticker (grading._fetch_bars serves both closes and volume)."""
     start = trade_date - timedelta(days=HISTORY_DAYS)
-    end = min(today, trade_date + timedelta(days=WEEK_LATER_DAYS + 5))
+    end = min(today, trade_date + timedelta(days=COOL_OFF_DAYS + 5))
     closes = grading.fetch_daily_closes(ticker, start, end)
     volumes = grading.fetch_daily_volumes(ticker, start, end) if closes else {}
     benchmark = grading.benchmark_for(ticker)
@@ -320,7 +383,8 @@ def stored_result(trade: Trade):
     for sells or before it has been run."""
     if trade.action != "buy" or not trade.fomo_checked_at:
         return None
-    saved = json.loads(trade.fomo_signals) if trade.fomo_signals else {}
+    saved = _saved(trade)
+    cool = saved.get("cool_off")
     return {
         "score": trade.fomo_score,
         "band": trade.fomo_band,
@@ -328,8 +392,18 @@ def stored_result(trade: Trade):
         "stats": saved.get("stats"),
         "summary": saved.get("summary"),
         "week_later_pct": trade.week_later_pct,
+        "cool_off": {**cool, "saved": waiting_saved(trade, cool)} if cool else None,
         "self_tagged": "fomo" in thesis.parse_tags(trade),
     }
+
+
+def _saved(trade: Trade) -> dict:
+    return json.loads(trade.fomo_signals) if trade.fomo_signals else {}
+
+
+def is_hot(t: Trade) -> bool:
+    """Chasing or warm - or admitted FOMO, whatever the score said."""
+    return t.fomo_band in HOT_BANDS or "fomo" in thesis.parse_tags(t)
 
 
 def _needs_check(t: Trade, today: date, now: datetime) -> bool:
@@ -339,9 +413,17 @@ def _needs_check(t: Trade, today: date, now: datetime) -> bool:
         return True
     if t.fomo_band == "unknown":
         return now - t.fomo_checked_at > RESCORE_UNKNOWN_AFTER
+    checked_on = t.fomo_checked_at.date()
     week_due = t.trade_date + timedelta(days=WEEK_LATER_DAYS)
     # Scored before a week had passed: run once more to fill the patience test.
-    return t.week_later_pct is None and today >= week_due and t.fomo_checked_at.date() < week_due
+    if t.week_later_pct is None and today >= week_due and checked_on < week_due:
+        return True
+    # Hot buys get the cool-off once two weeks of closes exist. Checks made
+    # before this existed (or that failed) are retried at most once a day.
+    cool_due = t.trade_date + timedelta(days=COOL_OFF_DAYS)
+    if is_hot(t) and today >= cool_due and "cool_off" not in _saved(t):
+        return checked_on < cool_due or now - t.fomo_checked_at > RESCORE_UNKNOWN_AFTER
+    return False
 
 
 def ensure_scored(db: Session, user: User, trades=None, today: date = None, limit: int = MAX_SCORE_PER_REQUEST):
@@ -362,6 +444,7 @@ def ensure_scored(db: Session, user: User, trades=None, today: date = None, limi
         "id": t.id, "ticker": t.ticker, "trade_date": t.trade_date, "trade_time": t.trade_time,
         "price": float(t.price_per_share), "quantity": float(t.quantity),
         "habits": habits_for(t.ticker, t.trade_date, t.id, everything, watchlist),
+        "self_tagged": "fomo" in thesis.parse_tags(t),
     } for t in todo]
 
     def run(job):
@@ -371,7 +454,9 @@ def ensure_scored(db: Session, user: User, trades=None, today: date = None, limi
                                quantity=job["quantity"], closes=closes, volumes=volumes,
                                bench_closes=bench, habits=job["habits"])
             entry = entry_price(closes, job["trade_date"], job["price"]) if closes else None
-            return result, week_later_pct(closes, job["trade_date"], entry)
+            hot = result["band"] in HOT_BANDS or job["self_tagged"]
+            cool = cool_off(closes, volumes, bench, job["trade_date"], entry) if hot else None
+            return result, week_later_pct(closes, job["trade_date"], entry), cool
         except Exception as e:  # one bad ticker shouldn't stop the rest
             print(f"[fomo] check failed for {job['ticker']} on {job['trade_date']}: {e}")
             return None
@@ -383,11 +468,14 @@ def ensure_scored(db: Session, user: User, trades=None, today: date = None, limi
     for job, outcome in zip(jobs, outcomes):
         if not outcome:
             continue
-        result, week_later = outcome
+        result, week_later, cool = outcome
         t = by_id[job["id"]]
         t.fomo_score = result["score"]
         t.fomo_band = result["band"]
-        t.fomo_signals = json.dumps({"signals": result["signals"], "stats": result["stats"], "summary": result["summary"]})
+        blob = {"signals": result["signals"], "stats": result["stats"], "summary": result["summary"]}
+        if cool:
+            blob["cool_off"] = cool
+        t.fomo_signals = json.dumps(blob)
         t.fomo_checked_at = now
         t.week_later_pct = week_later
     db.commit()
@@ -455,8 +543,20 @@ def personal_record(db: Session, user: User) -> dict:
     prior = statistics.mean(population) if len(population) >= MIN_POPULATION else 0.0
     expected = (sum(own) + SHRINK_K * prior) / (len(own) + SHRINK_K) if own or population else None
 
+    # Cool-off: what waiting until each hot buy calmed down would have done.
+    cooled = [(t, _saved(t)["cool_off"]) for t in buys if group_of(t) in HOT_BANDS and _saved(t).get("cool_off")]
+    waiting = {
+        "checked": len(cooled),
+        "cheaper": sum(c["change_pct"] < 0 for _, c in cooled),
+        "saved": round(sum(waiting_saved(t, c) for t, c in cooled), 2) if cooled else None,
+        "avg_change_pct": round(statistics.mean(c["change_pct"] for _, c in cooled), 2) if cooled else None,
+        "avg_sessions": round(statistics.mean(c["sessions"] for _, c in cooled), 1) if cooled else None,
+    }
+
     tagged = [t for t in buys if "fomo" in thesis.parse_tags(t) and t.fomo_band and t.fomo_band != "unknown"]
     return {
+        "waiting": waiting,
+        "waits": waits_summary(db, user),
         "groups": groups,
         "scored_buys": sum(1 for t in buys if t.fomo_band and t.fomo_band != "unknown"),
         "fomo_tax": round(tax, 2) if chasing else None,
@@ -477,8 +577,14 @@ def record_message(record: dict) -> str:
                      f"averaged {chasing['avg_vs_market_pct']:+.1f} points vs the S&P 500")
     if chasing["week_checked"]:
         parts.append(f"{chasing['cheaper_week_later']} of {chasing['week_checked']} were cheaper a week later")
+    waiting = record["waiting"]
+    if waiting["checked"]:
+        saved = waiting["saved"]
+        parts.append(f"waiting until it cooled off would have {'saved' if saved >= 0 else 'cost'} you "
+                     f"${abs(saved):,.0f} across {waiting['checked']} hot buy{'s' if waiting['checked'] != 1 else ''}")
     if parts:
-        return "; ".join(parts) + "."
+        text = "; ".join(parts) + "."
+        return text[0].upper() + text[1:]
     if record["expected_based_on"]["others"]:
         return f"Across InnerStock, chasing buys have averaged {record['expected_vs_market_pct']:+.1f} points vs the S&P 500."
     return "No graded chasing buys yet - this check gets personal as your record grows."
@@ -501,6 +607,18 @@ def advisor_context_section(db: Session, user: User) -> str:
         lines.append(f"- FOMO tax (graded chasing buys vs S&P 500): ${record['fomo_tax']:,.0f}")
     if record["self_tagged"]:
         lines.append(f"- User admitted FOMO on {record['self_tagged']} buys; the detector flagged {record['self_tagged_caught']} of them")
+    waiting = record["waiting"]
+    if waiting["checked"]:
+        lines.append(f"- Cool-off on {waiting['checked']} hot buys: buying when the stock next scored calm "
+                     f"(avg {waiting['avg_sessions']} sessions later) would have been {waiting['avg_change_pct']:+.1f}% "
+                     f"on average, ${waiting['saved']:,.0f} saved in total (negative = waiting would have cost); "
+                     f"cheaper {waiting['cheaper']}/{waiting['checked']} times")
+    waits = record["waits"]
+    if waits["resolved"]:
+        lines.append(f"- 'Wait 3 days' used {waits['resolved']} times instead of buying a flagged stock: "
+                     f"cheaper 3 sessions later {waits['cheaper']}/{waits['resolved']} times, avg {waits['avg_change_pct']:+.1f}%")
+    if waits["waiting"]:
+        lines.append(f"- Currently waiting on: {', '.join(waits['waiting_tickers'])}")
     return "\n".join(lines)
 
 
@@ -546,24 +664,35 @@ class EntryCheck(BaseModel):
     dollars: Optional[float] = Field(default=None, gt=0)  # instead of quantity
 
 
-@router.post("/fomo/check")
-def post_check(payload: EntryCheck, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def run_check(db: Session, user: User, payload: EntryCheck) -> dict:
+    """POST /fomo/check's logic, shared with "Wait 3 days"."""
     quantity = payload.quantity
     if quantity is None and payload.dollars and payload.price:
         quantity = payload.dollars / payload.price
-    result = check_entry(db, current_user, payload.ticker, payload.trade_date, payload.trade_time,
+    result = check_entry(db, user, payload.ticker, payload.trade_date, payload.trade_time,
                          payload.price, quantity)
     if quantity is None and payload.dollars and result["price"]:
         # No price given: size it at the latest price and re-check (cheap - cached).
-        result = check_entry(db, current_user, payload.ticker, payload.trade_date, payload.trade_time,
-                             result["price"], payload.dollars / result["price"])
-    return result
+        quantity = payload.dollars / result["price"]
+        result = check_entry(db, user, payload.ticker, payload.trade_date, payload.trade_time,
+                             result["price"], quantity)
+    return {**result, "quantity": round(quantity, 6) if quantity else None}
+
+
+@router.post("/fomo/check")
+def post_check(payload: EntryCheck, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    return run_check(db, current_user, payload)
+
+
+LEDGER_SIZE = 6
 
 
 @router.get("/fomo/summary")
 def get_summary(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    """The dashboard card: the personal record plus the latest flagged buys."""
+    """The dashboard card: the personal record, the latest flagged buys,
+    what waiting would have done on each, and the user's "Wait 3 days"."""
     ensure_scored(db, current_user)
+    waits = list_waits(db, current_user)  # resolves due waits first, so the record counts them
     record = personal_record(db, current_user)
     flagged = (
         db.query(Trade)
@@ -572,6 +701,7 @@ def get_summary(db: Session = Depends(get_db), current_user: User = Depends(get_
         .all()
     )
     recent = [t for t in flagged if group_of(t) == "chasing"][:5]
+    ledger = [t for t in flagged if group_of(t) in HOT_BANDS and _saved(t).get("cool_off")][:LEDGER_SIZE]
     return {
         "record": record,
         "message": record_message(record),
@@ -581,4 +711,189 @@ def get_summary(db: Session = Depends(get_db), current_user: User = Depends(get_
             "self_tagged": "fomo" in thesis.parse_tags(t), "week_later_pct": t.week_later_pct,
             "vs_market_pct": round(_excess(t), 2) if _excess(t) is not None else None,
         } for t in recent],
+        # NEW: "if you'd waited until it cooled off", newest hot buys first.
+        "waiting_ledger": [{
+            "id": t.id, "ticker": t.ticker, "trade_date": t.trade_date.isoformat(),
+            "band": t.fomo_band, "score": t.fomo_score, "self_tagged": "fomo" in thesis.parse_tags(t),
+            "price": float(t.price_per_share), "quantity": float(t.quantity),
+            "cool_off": stored_result(t)["cool_off"],
+        } for t in ledger],
+        "waits": waits,
     }
+
+
+# --- "Wait 3 days" ---------------------------------------------------------------------------
+# NEW: instead of buying a flagged stock, the user waits. The price is
+# saved now; once 3 more sessions have closed, the third close is the
+# answer: was it cheaper? It shows up in the notifications (bell) and on
+# the dashboard card, and counts in the personal record (record["waits"]).
+
+def add_sessions(day: date, n: int) -> date:
+    """n weekdays after `day` (holidays aren't known - the answer simply
+    arrives a day later if one falls in between)."""
+    while n:
+        day += timedelta(days=1)
+        if day.weekday() < 5:
+            n -= 1
+    return day
+
+
+def _wait_numbers(w: FomoWait):
+    """(change_pct, saved_dollars) once answered; saved > 0 = waiting saved money."""
+    if w.result_price is None:
+        return None, None
+    change = _pct(w.price, w.result_price)
+    saved = (w.price - w.result_price) * w.quantity if w.quantity else None
+    return round(change, 2), round(saved, 2) if saved is not None else None
+
+
+def wait_message(w: FomoWait) -> str:
+    change, saved = _wait_numbers(w)
+    when = w.check_date.strftime("%b %d").replace(" 0", " ")
+    if change is None:
+        return (f"Waiting on {w.ticker} (it was ${w.price:,.2f} on {when}). The answer comes after the close on "
+                f"{w.remind_on.strftime('%a %b %d').replace(' 0', ' ')}.")
+    later = f"{WAIT_SESSIONS} trading days later it closed at ${w.result_price:,.2f} ({change:+.1f}%)"
+    per_share = abs(w.price - w.result_price)
+    if change < 0:
+        verdict = f"waiting saved you ${saved:,.0f}" if saved is not None else f"waiting saved ${per_share:,.2f} a share"
+    elif change > 0:
+        verdict = (f"waiting cost ${abs(saved):,.0f} this time" if saved is not None
+                   else f"waiting cost ${per_share:,.2f} a share this time")
+    else:
+        verdict = "no difference"
+    return f"You almost bought {w.ticker} at ${w.price:,.2f} on {when}. {later}: {verdict}."
+
+
+def serialize_wait(w: FomoWait) -> dict:
+    change, saved = _wait_numbers(w)
+    return {
+        "id": w.id, "ticker": w.ticker, "price": w.price, "quantity": w.quantity,
+        "dollars": round(w.price * w.quantity, 2) if w.quantity else None,
+        "score": w.score, "band": w.band, "summary": w.summary,
+        "check_date": w.check_date.isoformat(), "remind_on": w.remind_on.isoformat(),
+        "status": "waiting" if w.result_price is None else "answered",
+        "result_date": w.result_date.isoformat() if w.result_date else None,
+        "result_price": w.result_price, "change_pct": change, "saved": saved,
+        "unread": w.result_price is not None and w.seen_at is None,
+        "message": wait_message(w),
+    }
+
+
+def resolve_waits(db: Session, user: User, today: date = None) -> int:
+    """Fills in the answer for waits whose 3 sessions have closed. Never raises."""
+    today = today or datetime.now(MARKET_TZ).date()
+    due = (db.query(FomoWait)
+           .filter(FomoWait.user_id == user.id, FomoWait.result_price.is_(None), FomoWait.remind_on <= today)
+           .order_by(FomoWait.remind_on).limit(MAX_RESOLVE_PER_REQUEST).all())
+    if not due:
+        return 0
+
+    def answer(w):
+        try:
+            closes = grading.fetch_daily_closes(w.ticker, w.check_date - timedelta(days=5), today)
+            after = [c for c in closes if c[0] > w.check_date]
+            return after[WAIT_SESSIONS - 1] if len(after) >= WAIT_SESSIONS else None
+        except Exception as e:
+            print(f"[fomo] wait answer failed for {w.ticker}: {e}")
+            return None
+
+    with ThreadPoolExecutor(max_workers=min(MAX_WORKERS, len(due))) as pool:
+        answers = list(pool.map(answer, due))
+    filled = 0
+    for w, found in zip(due, answers):
+        if found:
+            w.result_date, w.result_price = found[0], round(found[1], 4)
+            filled += 1
+    if filled:
+        db.commit()
+    return filled
+
+
+def waits_summary(db: Session, user: User) -> dict:
+    waits = db.query(FomoWait).filter(FomoWait.user_id == user.id).all()
+    answered = [w for w in waits if w.result_price is not None]
+    numbers = [_wait_numbers(w) for w in answered]
+    saved = [s for _, s in numbers if s is not None]
+    return {
+        "resolved": len(answered),
+        "cheaper": sum(c < 0 for c, _ in numbers),
+        "avg_change_pct": round(statistics.mean(c for c, _ in numbers), 2) if numbers else None,
+        "saved": round(sum(saved), 2) if saved else None,
+        "saved_on": len(saved),
+        "waiting": len(waits) - len(answered),
+        "waiting_tickers": sorted({w.ticker for w in waits if w.result_price is None}),
+    }
+
+
+def list_waits(db: Session, user: User) -> dict:
+    resolve_waits(db, user)
+    rows = (db.query(FomoWait).filter(FomoWait.user_id == user.id)
+            .order_by(FomoWait.check_date.desc(), FomoWait.id.desc()).limit(WAITS_LISTED).all())
+    return {"waits": [serialize_wait(w) for w in rows], "summary": waits_summary(db, user)}
+
+
+def answered_waits_for_notifications(db: Session, user: User):
+    """(answered waits newest first, how many are unseen) for GET /notifications."""
+    resolve_waits(db, user)
+    rows = (db.query(FomoWait)
+            .filter(FomoWait.user_id == user.id, FomoWait.result_price.isnot(None))
+            .order_by(FomoWait.result_date.desc(), FomoWait.id.desc()).limit(WAITS_LISTED).all())
+    return [serialize_wait(w) for w in rows], sum(w.seen_at is None for w in rows)
+
+
+def mark_waits_seen(db: Session, user: User):
+    db.query(FomoWait).filter(
+        FomoWait.user_id == user.id, FomoWait.result_price.isnot(None), FomoWait.seen_at.is_(None)
+    ).update({FomoWait.seen_at: datetime.utcnow()}, synchronize_session=False)
+
+
+class WaitCreate(BaseModel):
+    ticker: str = Field(min_length=1, max_length=15)
+    price: Optional[float] = Field(default=None, gt=0)      # default: the latest price
+    quantity: Optional[float] = Field(default=None, gt=0)
+    dollars: Optional[float] = Field(default=None, gt=0)    # instead of quantity
+
+
+@router.post("/fomo/waits", status_code=201)
+def create_wait(payload: WaitCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    ticker = payload.ticker.strip().upper()
+    open_waits = db.query(FomoWait).filter(FomoWait.user_id == current_user.id, FomoWait.result_price.is_(None)).all()
+    same = next((w for w in open_waits if w.ticker == ticker), None)
+    if same:
+        raise HTTPException(status_code=409, detail=f"You're already waiting on {ticker} - "
+                            f"the answer comes after the close on {same.remind_on.strftime('%a %b %d').replace(' 0', ' ')}.")
+    if len(open_waits) >= MAX_OPEN_WAITS:
+        raise HTTPException(status_code=429, detail="You have too many waits open - let some finish first.")
+
+    # Always "buying right now": the check is re-run here, so what's stored
+    # is the server's own score, not whatever the page sent.
+    check = run_check(db, current_user, EntryCheck(ticker=ticker, price=payload.price,
+                                                     quantity=payload.quantity, dollars=payload.dollars))
+    if check["band"] == "unknown" or not check["price"]:
+        raise HTTPException(status_code=400, detail="Not enough price history to check this one.")
+    check_date = date.fromisoformat(check["trade_date"])
+    wait = FomoWait(
+        user_id=current_user.id, ticker=check["ticker"], price=float(check["price"]), quantity=check["quantity"],
+        score=check["score"], band=check["band"], summary=check["summary"],
+        check_date=check_date, remind_on=add_sessions(check_date, WAIT_SESSIONS),
+    )
+    db.add(wait)
+    db.commit()
+    db.refresh(wait)
+    return serialize_wait(wait)
+
+
+@router.get("/fomo/waits")
+def get_waits(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    return list_waits(db, current_user)
+
+
+@router.delete("/fomo/waits/{wait_id}")
+def delete_wait(wait_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    wait = db.query(FomoWait).filter(FomoWait.id == wait_id, FomoWait.user_id == current_user.id).first()
+    if not wait:
+        raise HTTPException(status_code=404, detail="Wait not found")
+    db.delete(wait)
+    db.commit()
+    return {"success": True}

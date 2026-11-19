@@ -24,43 +24,6 @@ Most brokerage apps show you *what* you own. InnerStock asks *why* you bought it
 
 ---
 
-## The FOMO check
-
-Most FOMO detectors use a fixed rule, such as "the stock rose more than 5% this week". That rule is unfair in both directions: +5% is a normal week for a volatile stock like PLTR and a big week for a broad ETF. It also ignores whether the whole market rose too.
-
-InnerStock measures each run-up against **that stock's own normal week**, after taking out the market's move:
-
-```
-         stock's 5-day return  −  market's 5-day return
-z  =  ─────────────────────────────────────────────────
-       the stock's normal 5-day move (volatility measured
-       over the 60 sessions BEFORE the run-up week)
-```
-
-The comparison uses the matching S&P 500 fund: SPY for US stocks and VFV.TO for Canadian ones. The 60 sessions end *before* the run-up week, so the run-up isn't counted in "normal" and can't hide itself.
-
-The score adds points from two kinds of signals:
-
-| Signal | Points |
-|---|---|
-| Unusual run-up (z ≥ 2 / z ≥ 1.5) | +30 / +15 |
-| Within 3% of the 20-day high after a run-up | +10 |
-| Volume at least 2× the 20-day average | +15 |
-| A one-day jump at least 3× a normal day | +10 |
-| Bought in the first 30 minutes after the open | +10 |
-| At least 2× your usual buy size | +10 |
-| A stock you've never traded and never watched | +5 |
-| Buying back within 30 days, above the price you sold at | +10 |
-
-The total puts the buy in a band: **Chasing** (60+), **Warm** (30+), **Calm**, or **Dip buy** (bought after a sharp drop).
-
-The app then checks each band against what actually happened:
-- **FOMO tax:** the dollars your chasing buys made or lost compared with the S&P 500.
-- **Patience test:** how often a chased stock was cheaper a week later.
-- **Your own labels:** how many of the buys you tagged "fear of missing out" the detector also caught.
-- **Expected cost of your next chase:** your own average, pulled toward the average of other users until you have enough trades of your own.
-
-The code is in [`Backend/fomo.py`](Backend/fomo.py) and the tests are in [`Backend/tests/test_fomo.py`](Backend/tests/test_fomo.py).
 
 ---
 
